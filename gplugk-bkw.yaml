@@ -6,9 +6,12 @@ substitutions:
   device_name: gplugk-bkw
   friendly_name: gPlugK
 
-  # gPlugK HW 2.2
+  # gPlugK HW 2.x - Pinbelegung
   han_rx_pin: GPIO4
-  data_led_pin: GPIO6
+  led_red_pin: GPIO5
+  led_green_pin: GPIO6
+  led_blue_pin: GPIO7
+  ap_button_pin: GPIO9
 
   # BKW-Ablesefaktor/Wandlerfaktor.
   # Bei einem normalen Direktmesszaehler auf 1.0 belassen.
@@ -27,6 +30,10 @@ esphome:
   friendly_name: ${friendly_name}
   min_version: 2026.8.2
   comment: BKW Kamstrup OMNIPOWER KS2 via native ESPHome DLMS
+  on_boot:
+    - priority: -100
+      then:
+        - script.execute: status_led_startup
 
 esp32:
   board: esp32-c3-devkitm-1
@@ -42,14 +49,18 @@ debug:
   update_interval: 60s
 
 wifi:
+  id: gplugk_wifi
   ssid: !secret wifi_ssid
   password: !secret wifi_password
   power_save_mode: light
   reboot_timeout: 0s
+  on_connect:
+    - lambda: id(gplugk_wifi).set_ap_timeout(0);
   ap:
-    ssid: "${device_name} Fallback"
+    ssid: "${device_name} Setup"
     password: !secret fallback_password
-    ap_timeout: 90s
+    # Der physische AP-Taster auf GPIO9 aktiviert den Fallback-AP bei Bedarf.
+    ap_timeout: 0s
 
 captive_portal:
 
@@ -102,7 +113,7 @@ uart:
   stop_bits: 1
   rx_buffer_size: 4096
 
-# ESPHome-eigene DLMS-Unterstuetzung.
+# ESPHome-eigene DLMS-Unterstuetzung. Kein components/-Ordner erforderlich.
 dlms_meter:
   id: bkw_meter
   uart_id: meter_uart
@@ -120,7 +131,7 @@ dlms_meter:
       priority: 0
       default_obis: "1.1.0.2.129.255"
 
-# Laufzeitstatus fuer Diagnosewerte.
+# Laufzeitstatus fuer Diagnosewerte. Keine Flash-Schreibvorgaenge.
 globals:
   - id: last_data_ms
     type: uint32_t
@@ -152,22 +163,83 @@ globals:
     restore_value: no
     initial_value: '0.0'
 
-# Gruene LED: 1 Sekunde bei Empfang des Bezugs-Energie-Werts.
-# Dieser Wert kommt normalerweise einmal pro 10-Sekunden-Telegramm.
+  # Status-LED-Laufzeitwerte. Keine Speicherung im Flash.
+  - id: led_startup_active
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+
+  - id: green_flash_until_ms
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+
+# Die gPlugK-RGB-LED besteht laut offiziellem Script aus drei getrennten
+# aktiven High-Ausgaengen: Rot=GPIO5, Gruen=GPIO6, Blau=GPIO7.
 output:
   - platform: gpio
-    id: green_led_output
+    id: status_led_red
     pin:
-      number: ${data_led_pin}
+      number: ${led_red_pin}
+      inverted: false
+
+  - platform: gpio
+    id: status_led_green
+    pin:
+      number: ${led_green_pin}
+      inverted: false
+
+  - platform: gpio
+    id: status_led_blue
+    pin:
+      number: ${led_blue_pin}
       inverted: false
 
 script:
+  # Startanzeige: einmal Rot -> Gruen -> Blau.
+  - id: status_led_startup
+    mode: restart
+    then:
+      - lambda: id(led_startup_active) = true;
+      - output.turn_off: status_led_red
+      - output.turn_off: status_led_green
+      - output.turn_off: status_led_blue
+      - output.turn_on: status_led_red
+      - delay: 500ms
+      - output.turn_off: status_led_red
+      - output.turn_on: status_led_green
+      - delay: 500ms
+      - output.turn_off: status_led_green
+      - output.turn_on: status_led_blue
+      - delay: 500ms
+      - output.turn_off: status_led_blue
+      - lambda: id(led_startup_active) = false;
+
+  # Kurzer Gruen-Impuls bei einem empfangenen Zaehlertelegramm.
   - id: blink_data_led
     mode: restart
     then:
-      - output.turn_on: green_led_output
-      - delay: 1s
-      - output.turn_off: green_led_output
+      - lambda: id(green_flash_until_ms) = millis() + 300;
+
+  # Der AP-Taster ist als Wiederherstellungs-/Setup-Taster gedacht.
+  # Da ESPHome keinen eigenen "AP jetzt starten"-Action anbietet, wird
+  # der bereits konfigurierte Fallback-AP durch ein sehr kurzes Timeout
+  # freigegeben. Das funktioniert insbesondere dann, wenn kein WLAN besteht.
+  - id: enable_setup_ap
+    mode: restart
+    then:
+      - if:
+          condition:
+            wifi.connected:
+          then:
+            - logger.log:
+                level: INFO
+                format: "AP-Taste: WLAN ist bereits verbunden. WLAN-Aenderungen per ESPHome/OTA vornehmen."
+          else:
+            - logger.log:
+                level: INFO
+                format: "AP-Taste: Setup-Access-Point wird aktiviert."
+            - lambda: id(gplugk_wifi).set_ap_timeout(1);
 
   # Wird einmal pro vollstaendig bis zum letzten numerischen OBIS-Wert
   # gelaufenem Telegramm aufgerufen. Hier entstehen die Laufzeitstatistiken
@@ -282,6 +354,36 @@ script:
           previous_ms = now;
           previous_import = isnan(import_now) ? 0.0f : import_now;
           previous_export = isnan(export_now) ? 0.0f : export_now;
+
+# RGB-Statuslogik. Prioritaet: Startsequenz > WLAN-Fehler > keine Daten > Datenimpuls.
+# Rot blinkt ca. alle 9 s ohne WLAN, Blau ca. alle 15 s ohne Zaehlerdaten,
+# Gruen flackert kurz bei jedem empfangenen Telegramm.
+interval:
+  - interval: 250ms
+    then:
+      - lambda: |-
+          if (id(led_startup_active)) return;
+
+          const uint32_t now = millis();
+          id(status_led_red).turn_off();
+          id(status_led_green).turn_off();
+          id(status_led_blue).turn_off();
+
+          if (!id(gplugk_wifi).is_connected()) {
+            if ((now % 9000U) < 250U) id(status_led_red).turn_on();
+            return;
+          }
+
+          const bool data_stale = id(last_data_ms) == 0 ||
+              uint32_t(now - id(last_data_ms)) >= ${stale_after_ms};
+          if (data_stale) {
+            if ((now % 15000U) < 250U) id(status_led_blue).turn_on();
+            return;
+          }
+
+          if (int32_t(id(green_flash_until_ms) - now) > 0) {
+            id(status_led_green).turn_on();
+          }
 
 sensor:
   # --- Gesamtwerte ---------------------------------------------------------
@@ -732,7 +834,7 @@ sensor:
     web_server:
       sorting_group_id: group_energy
 
-  # --- Berechnete Werte ----------------------------------------------------
+  # --- Berechnete Werte ------------------------------------------------------
   # Bezug ist positiv, Ruecklieferung negativ. Die Berechnungen verwenden
   # ausschliesslich die oben empfangenen und bereits skalierten Zaehlerwerte.
   - platform: template
@@ -1228,6 +1330,28 @@ binary_sensor:
     web_server:
       sorting_group_id: group_diagnostics
 
+  # Physischer AP-Taster des gPlugK. 
+  # GPIO9 ist beim ESP32-C3 zugleich ein Boot-Strap-Pin.
+  - platform: gpio
+    id: ap_mode_button
+    name: "AP-Taste"
+    entity_category: diagnostic
+    pin:
+      number: ${ap_button_pin}
+      mode:
+        input: true
+        pullup: true
+      inverted: true
+      ignore_strapping_warning: true
+    filters:
+      - delayed_on: 30ms
+      - delayed_off: 30ms
+    on_press:
+      then:
+        - script.execute: enable_setup_ap
+    web_server:
+      sorting_group_id: group_diagnostics
+
   - platform: template
     name: "Zaehlerdaten aktuell"
     id: data_fresh
@@ -1261,3 +1385,11 @@ binary_sensor:
     web_server:
       sorting_group_id: group_diagnostics
 
+
+# Software-Gegenstueck zum physischen Reset-Taster. 
+button:
+  - platform: restart
+    name: "Software Neustart"
+    entity_category: config
+    web_server:
+      sorting_group_id: group_diagnostics
