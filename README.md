@@ -4,8 +4,6 @@ ESPHome-Konfiguration für den **gPlugK mit ESP32-C3** am BKW/Kamstrup-OMNIPOWER
 
 Das Repository besteht nur aus normaler ESPHome-YAML. Es werden **keine lokalen oder externen Custom Components** benötigt. Die Zählerwerte werden mit dem nativen `dlms_meter` von ESPHome gelesen und über die ESPHome-API direkt an Home Assistant übertragen.
 
-Die Hardware-Pinbelegung in dieser Konfiguration wurde mit der offiziellen gPlugK-Installationsanleitung und dem dort veröffentlichten Script abgeglichen:
-
 > **Wichtig:** Das Aufspielen von ESPHome ersetzt die ab Werk installierte Tasmota-Firmware. gPlug.ch weist darauf hin, dass der Hersteller-Support nur für die ausgelieferte Firmware gewährleistet wird. Ein Firmwarewechsel erfolgt deshalb auf eigene Verantwortung.
 
 ---
@@ -30,7 +28,7 @@ Die Hardware-Pinbelegung in dieser Konfiguration wurde mit der offiziellen gPlug
 
 # 1. Hardware und Pinbelegung
 
-Das auf der offiziellen Seite veröffentlichte gPlugK-Script definiert folgende Pins:
+Der gPlugK definiert folgende Pins:
 
 ```text
 rL    = 5
@@ -166,7 +164,7 @@ In der YAML steht:
 ap_timeout: 0s
 ```
 
-Das ist absichtlich so gewählt. Auch das aktuell veröffentlichte gPlugK-Script vermeidet einen automatisch dauerhaft gestarteten AP, weil der Access-Point-Betrieb zusätzliche Leistung benötigt. Der gPlugK wird im normalen Betrieb über die Kundenschnittstelle des Zählers versorgt, deren Leistungsreserve begrenzt sein kann.
+Das ist absichtlich so gewählt. Wir vermeiden einen automatisch dauerhaft gestarteten AP, weil der Access-Point-Betrieb zusätzliche Leistung benötigt. Der gPlugK wird im normalen Betrieb über die Kundenschnittstelle des Zählers versorgt, deren Leistungsreserve begrenzt sein kann.
 
 Der physische AP-Taster übernimmt deshalb die Wiederherstellungsfunktion.
 
@@ -216,7 +214,44 @@ bereit. Damit kann derselbe praktische Effekt auch aus der Ferne ausgelöst werd
 
 ---
 
-# 6. Voraussetzungen
+# 6. Energieversorgung und Low-Power-Profil
+
+Die Kamstrup-HAN-Schnittstelle ist leistungsmässig knapp dimensioniert. Kamstrup spezifiziert für das angeschlossene HEMS maximal **144 mW** beziehungsweise **6 mA (4 Unit Loads nach EN 13757-2)**. Die offizielle gPlugK-Seite weist zudem darauf hin, dass HW V3.11 gegenüber den älteren Versionen um eine **Strombegrenzung** ergänzt wurde. Der grosse Superkondensator auf der V3.11-Platine puffert die kurzzeitigen Lastspitzen des ESP32-C3, insbesondere beim WLAN-Senden.
+
+Die ESPHome-Konfiguration verwendet deshalb bewusst ein konservatives Energiesparprofil:
+
+- **ESP-IDF Dynamic Frequency Scaling (DFS)** ist aktiviert.
+- Maximale CPU-Frequenz: **160 MHz**.
+- Im Leerlauf kann ESP-IDF bis auf die **40-MHz-XTAL-Frequenz** heruntertakten.
+- WLAN verwendet `power_save_mode: light`, was bei ESP32/ESP-IDF dem **WIFI_PS_MIN_MODEM**-Modus entspricht.
+- Der ESP32 bleibt mit dem WLAN verbunden.
+- **Auto-Light-Sleep wird absichtlich nicht aktiviert**, damit der asynchrone DLMS-UART-Empfang auf GPIO4 nicht während eines Schlafzustands verpasst werden kann.
+- Die ESPHome-API bündelt Zustandsänderungen mit `batch_delay: 500ms`, damit die vielen Werte eines DLMS-Telegramms möglichst in wenigen WLAN-Paketen übertragen werden.
+- Webserver, API, OTA und die vollständigen Messwerte bleiben verfügbar.
+
+Espressif empfiehlt für ESP32-C3-WLAN-Anwendungen ausdrücklich die Kombination **Min Modem-sleep + DFS**. In den Referenzmessungen von Espressif sinkt der mittlere Chipstrom bei DTIM 1 von rund **21,47 mA ohne DFS auf 11,35 mA mit DFS**. Diese Messwerte sind keine garantierte Leistungsaufnahme des kompletten gPlugK, zeigen aber, weshalb DFS für diese Anwendung sinnvoll ist.
+
+Das originale gPlugK reduziert die CPU ebenfalls aus Energiespargründen und nennt für 160 → 80 MHz eine Einsparung von ungefähr einem Drittel. ESPHome nutzt hier stattdessen DFS: Leistung steht bei Bedarf bis 160 MHz zur Verfügung, während der Takt in Leerlaufphasen automatisch sinkt.
+
+### Warum `power_save_mode: high` nicht Standard ist
+
+ESPHome bietet zusätzlich `high` an. Das entspricht unter ESP-IDF `WIFI_PS_MAX_MODEM` und kann noch stärker sparen, erhöht aber die Latenz und kann Broadcast-/Multicast-Pakete verpassen. ESPHome weist zudem darauf hin, dass der höchste Energiesparmodus die WLAN-Zuverlässigkeit verschlechtern kann. Für einen dauerhaft erreichbaren Home-Assistant-Sensor ist `light` deshalb die robustere Grundeinstellung.
+
+### Warum die WLAN-Sendeleistung nicht fest reduziert wird
+
+Das originale gPlugK-Script nutzt eine dynamische WLAN-Sendeleistung. ESPHome bietet in der YAML dagegen eine feste maximale `output_power`-Vorgabe. Eine pauschale Reduktion wäre im Zählerschrank riskant: Bei schwachem Empfang können Wiederholungen und Reconnects den Energieverbrauch sogar erhöhen. Deshalb bleibt die Sendeleistung automatisch/default.
+
+Wenn der gPlugK am endgültigen Einbauort dauerhaft besser als ungefähr **-60 dBm** empfängt, kann eine reduzierte maximale Sendeleistung später separat getestet werden. Für die Standardkonfiguration ist das nicht erforderlich.
+
+Quellen:
+
+- Kamstrup HAN module data sheet: https://kamstrup-delivery.sitecorecontenthub.cloud/api/public/content/60724-downloadOriginal?v=3794f2c2
+- ESPHome WiFi: https://esphome.io/components/wifi/
+- Espressif ESP32-C3 Low Power WiFi: https://docs.espressif.com/projects/esp-idf/en/v5.5/esp32c3/api-guides/low-power-mode/low-power-mode-wifi.html
+
+---
+
+# 7. Voraussetzungen
 
 Du benötigst:
 
@@ -230,7 +265,7 @@ Du benötigst:
 
 ---
 
-# 7. Dateien im Repository
+# 8. Dateien im Repository
 
 ```text
 gplugk-bkw.yaml          Hauptkonfiguration
@@ -250,7 +285,7 @@ secrets.yaml
 
 ---
 
-# 8. Schnellstart für Einsteiger
+# 9. Schnellstart für Einsteiger
 
 ## Schritt 1 – Dateien kopieren
 
@@ -289,9 +324,11 @@ bkw_gpk60: "00112233445566778899AABBCCDDEEFF"
 
 Ersetze selbstverständlich alle Beispielwerte durch deine eigenen Werte.
 
+> `secrets.yaml` niemals auf GitHub hochladen. Darin stehen WLAN-Passwort, API-Key und dein persönlicher Zählerschlüssel.
+
 ---
 
-# 9. GPK60 und GPK61
+# 10. GPK60 und GPK61
 
 ## GPK60
 
@@ -329,7 +366,7 @@ bkw_gpk61: "FFEEDDCCBBAA99887766554433221100"
 
 ---
 
-# 10. Wandlerfaktor
+# 11. Wandlerfaktor
 
 Oben in `gplugk-bkw.yaml` steht:
 
@@ -359,7 +396,7 @@ Der Faktor wird auf Energie, Strom und Leistung angewendet. Spannung und Leistun
 
 ---
 
-# 11. Hauptsicherung
+# 12. Hauptsicherung
 
 Oben in der YAML steht:
 
@@ -389,7 +426,7 @@ Dadurch werden diese Werte sinnvoll berechnet:
 
 ---
 
-# 12. Kompilieren und installieren
+# 13. Kompilieren und installieren
 
 ## ESPHome Dashboard
 
@@ -414,7 +451,7 @@ Danach versucht das Gerät, sich mit deinem WLAN zu verbinden.
 
 ---
 
-# 13. Wenn nach dem Flashen kein WLAN erreichbar ist
+# 14. Wenn nach dem Flashen kein WLAN erreichbar ist
 
 1. gPlugK vorzugsweise über USB-C versorgen.
 2. Kurz den **AP-Taster** drücken.
@@ -436,7 +473,7 @@ http://192.168.4.1/
 
 ---
 
-# 14. Home Assistant
+# 15. Home Assistant
 
 Es wird keine zusätzliche Home-Assistant-YAML benötigt.
 
@@ -453,7 +490,7 @@ Falls nicht:
 
 ---
 
-# 15. Energy Dashboard
+# 16. Energy Dashboard
 
 Für das Home-Assistant-Energy-Dashboard sind besonders geeignet:
 
@@ -466,7 +503,7 @@ Beide werden in `kWh` mit `total_increasing` bereitgestellt.
 
 ---
 
-# 16. Direkte Zählerwerte
+# 17. Direkte Zählerwerte
 
 Die YAML liest 30 numerische DLMS-Werte.
 
@@ -522,7 +559,7 @@ Zusätzlich werden als Textwerte veröffentlicht:
 
 ---
 
-# 17. Berechnete Werte
+# 18. Berechnete Werte
 
 | Sensor | Bedeutung |
 | --- | --- |
@@ -543,7 +580,7 @@ Zusätzlich werden als Textwerte veröffentlicht:
 
 ---
 
-# 18. 15-Minuten- und Laufzeitwerte
+# 19. 15-Minuten- und Laufzeitwerte
 
 Im RAM des ESP32 werden zusätzlich geführt:
 
@@ -563,7 +600,7 @@ Nach einem Neustart beginnen Laufzeit- und Peakwerte wieder von vorne. Das verhi
 
 ---
 
-# 19. Freshness / veraltete Daten
+# 20. Freshness / veraltete Daten
 
 Standardmäßig gilt ein Datensatz nach 35 Sekunden ohne neues vollständiges Telegramm als veraltet:
 
@@ -583,7 +620,7 @@ Bei fehlenden Daten:
 
 ---
 
-# 20. Diagnosewerte
+# 21. Diagnosewerte
 
 ## WLAN
 
@@ -618,6 +655,8 @@ Grobe RSSI-Orientierung:
 
 Die `Chiptemperatur` ist die interne Temperatur des ESP32-C3 und **keine Raumtemperatur**.
 
+Die CPU läuft nicht dauerhaft mit 160 MHz: Durch das aktivierte ESP-IDF-DFS kann sie in Leerlaufphasen bis auf 40 MHz heruntertakten und bei Last automatisch wieder höher takten. Das geschieht transparent; DLMS, API und Weboberfläche müssen dafür nicht abgeschaltet werden.
+
 ## Zählerdiagnose
 
 - Datenstatus
@@ -636,7 +675,7 @@ Die `Chiptemperatur` ist die interne Temperatur des ESP32-C3 und **keine Raumtem
 
 ---
 
-# 21. Lokale Weboberfläche
+# 22. Lokale Weboberfläche
 
 Rufe die IP-Adresse des Geräts auf, zum Beispiel:
 
@@ -668,7 +707,7 @@ Die Entitäten werden in Gruppen sortiert:
 
 ---
 
-# 22. Typische Fehler
+# 23. Typische Fehler
 
 ## RGB-LED bleibt nach dem Start blau
 
@@ -730,7 +769,7 @@ Dann sollte die normale Firmware wieder starten.
 
 ---
 
-# 23. Sicherheit
+# 24. Sicherheit
 
 Folgende Werte niemals veröffentlichen:
 
@@ -746,7 +785,7 @@ Genau deshalb liegt nur `secrets.example.yaml` im Repository.
 
 ---
 
-# 24. Die wichtigsten Einstellungen auf einen Blick
+# 25. Die wichtigsten Einstellungen auf einen Blick
 
 Für einen normalen Direktmesszähler mit 25-A-Hauptsicherung müssen meistens nur diese Werte stimmen:
 

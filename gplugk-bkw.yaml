@@ -6,7 +6,7 @@ substitutions:
   device_name: gplugk-bkw
   friendly_name: gPlugK
 
-  # gPlugK HW 2.x - Pinbelegung
+  # gPlugK HW 2.x und 3.x
   han_rx_pin: GPIO4
   led_red_pin: GPIO5
   led_green_pin: GPIO6
@@ -37,8 +37,18 @@ esphome:
 
 esp32:
   board: esp32-c3-devkitm-1
+  # ESP32-C3 darf bis 160 MHz laufen. Mit DFS taktet ESP-IDF im Leerlauf
+  # automatisch bis auf die 40-MHz-XTAL-Frequenz herunter. So bleibt fuer
+  # DLMS/API kurzzeitig volle Leistung verfuegbar, ohne dauerhaft 160 MHz zu nutzen.
+  cpu_frequency: 160MHz
   framework:
     type: esp-idf
+    sdkconfig_options:
+      # Espressif-Empfehlung fuer WiFi-Geraete: Min Modem-sleep + DFS.
+      # Auto-Light-Sleep wird absichtlich NICHT aktiviert, damit der asynchrone
+      # 2400-Baud-DLMS-Empfang auf GPIO4 jederzeit sicher aktiv bleibt.
+      CONFIG_PM_ENABLE: y
+      CONFIG_PM_DFS_INIT_AUTO: y
 
 logger:
   level: INFO
@@ -59,7 +69,8 @@ wifi:
   ap:
     ssid: "${device_name} Setup"
     password: !secret fallback_password
-    # Der physische AP-Taster auf GPIO9 aktiviert den Fallback-AP bei Bedarf.
+    # Wie im aktuell publizierten gPlugK-Script kein automatischer Fallback-AP.
+    # Der physische AP-Taster auf GPIO9 aktiviert ihn bei Bedarf.
     ap_timeout: 0s
 
 captive_portal:
@@ -68,6 +79,10 @@ api:
   encryption:
     key: !secret api_key
   reboot_timeout: 0s
+  # Die vielen Werte eines DLMS-Telegramms werden moeglichst gemeinsam gesendet.
+  # 500 ms sind gegenueber dem ca. 10-s-Zaehlerintervall praktisch nicht bemerkbar,
+  # reduzieren aber unnoetige einzelne WLAN-Pakete.
+  batch_delay: 500ms
 
 ota:
   - platform: esphome
@@ -113,7 +128,7 @@ uart:
   stop_bits: 1
   rx_buffer_size: 4096
 
-# ESPHome-eigene DLMS-Unterstuetzung. Kein components/-Ordner erforderlich.
+# ESPHome-eigene DLMS-Unterstuetzung.
 dlms_meter:
   id: bkw_meter
   uart_id: meter_uart
@@ -174,7 +189,7 @@ globals:
     restore_value: no
     initial_value: '0'
 
-# Die gPlugK-RGB-LED besteht laut offiziellem Script aus drei getrennten
+# Die gPlugK-RGB-LED besteht aus drei getrennten
 # aktiven High-Ausgaengen: Rot=GPIO5, Gruen=GPIO6, Blau=GPIO7.
 output:
   - platform: gpio
@@ -834,7 +849,7 @@ sensor:
     web_server:
       sorting_group_id: group_energy
 
-  # --- Berechnete Werte ------------------------------------------------------
+  # --- Berechnete Werte ----------------------------------------------------
   # Bezug ist positiv, Ruecklieferung negativ. Die Berechnungen verwenden
   # ausschliesslich die oben empfangenen und bereits skalierten Zaehlerwerte.
   - platform: template
@@ -1330,8 +1345,7 @@ binary_sensor:
     web_server:
       sorting_group_id: group_diagnostics
 
-  # Physischer AP-Taster des gPlugK. 
-  # GPIO9 ist beim ESP32-C3 zugleich ein Boot-Strap-Pin.
+  # Physischer AP-Taster des gPlugK. GPIO9 ist beim ESP32-C3 zugleich ein Boot-Strap-Pin.
   - platform: gpio
     id: ap_mode_button
     name: "AP-Taste"
