@@ -534,6 +534,7 @@ Zusätzlich werden als Textwerte veröffentlicht:
 | Scheinleistung Summe U x I | Summe von Spannung × Strom je Phase |
 | Hauptsicherung Auslastung | Belastung der stärksten Phase in % |
 | Stromreserve schwaechste Phase | Reserve bis zum eingestellten Sicherungswert |
+| Hauptsicherung | Eingestellter Sicherungswert |
 | Hoechstbelastete Phase | L1, L2 oder L3 |
 
 ---

@@ -1309,6 +1309,18 @@ text_sensor:
     entity_category: diagnostic
     web_server:
       sorting_group_id: group_info
+      
+  - platform: template
+    name: "Hauptsicherung"
+    id: main_fuse_sensor
+    icon: "mdi:fuse"
+    unit_of_measurement: "A"
+    device_class: current
+    state_class: measurement
+    accuracy_decimals: 0
+    lambda: |-
+      return ${main_fuse_a};
+    update_interval: never
 
   - platform: template
     name: "Hoechstbelastete Phase"
