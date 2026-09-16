@@ -964,6 +964,18 @@ sensor:
       return std::max(id(current_l1).state, std::max(id(current_l2).state, id(current_l3).state));
     web_server:
       sorting_group_id: group_calculated
+      
+  - platform: template
+    name: "Hauptsicherung"
+    id: main_fuse_sensor
+    icon: "mdi:fuse"
+    unit_of_measurement: "A"
+    device_class: current
+    state_class: measurement
+    accuracy_decimals: 0
+    lambda: |-
+      return ${main_fuse_a};
+    update_interval: never
 
   - platform: template
     id: fuse_utilization
@@ -1309,18 +1321,6 @@ text_sensor:
     entity_category: diagnostic
     web_server:
       sorting_group_id: group_info
-      
-  - platform: template
-    name: "Hauptsicherung"
-    id: main_fuse_sensor
-    icon: "mdi:fuse"
-    unit_of_measurement: "A"
-    device_class: current
-    state_class: measurement
-    accuracy_decimals: 0
-    lambda: |-
-      return ${main_fuse_a};
-    update_interval: never
 
   - platform: template
     name: "Hoechstbelastete Phase"
