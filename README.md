@@ -17,7 +17,7 @@ Das Repository besteht nur aus normaler ESPHome-YAML. Es werden **keine lokalen 
 - saldierte Leistungs-, Strom- und Sicherungswerte berechnen
 - zeitgewichtete 15-Minuten-Mittel berechnen
 - veraltete Zählerdaten erkennen
-- WLAN-, Speicher-, Temperatur- und Laufzeitdiagnose liefern
+- WLAN-, Temperatur- und Laufzeitdiagnose liefern
 - lokale ESPHome-Weboberfläche bereitstellen
 - OTA-Updates ermöglichen
 - die RGB-LED des Boards als Statusanzeige verwenden
@@ -131,11 +131,13 @@ Der Access Point heißt standardmäßig:
 gplugk-bkw Setup
 ```
 
-Das Passwort ist der Wert `fallback_password` aus `secrets.yaml`. Falls das Captive Portal nicht automatisch erscheint, öffne:
+Das Passwort ist der Wert `fallback_password` aus `secrets.yaml`. Falls das Captive Portal nicht automatisch erscheint, öffne einen Pfad ungleich `/`, zum Beispiel:
 
 ```text
-http://192.168.4.1/
+http://192.168.4.1/setup
 ```
+
+Die Adresse `http://192.168.4.1/` zeigt bei dieser Konfiguration die normale ESPHome-Weboberfläche.
 
 In der YAML steht absichtlich `ap_timeout: 0s`. Der Setup-AP läuft damit nicht unnötig im normalen Betrieb, sondern wird bei Bedarf über den Taster freigegeben. Für längere Einrichtung oder Flash-Vorgänge ist eine zusätzliche Versorgung über USB-C sinnvoll.
 
@@ -179,7 +181,7 @@ Die ESPHome-Konfiguration ist deshalb auf niedrigen Durchschnittsverbrauch ausge
 - **Auto-Light-Sleep ist nicht aktiviert**, damit der kontinuierliche DLMS-UART-Empfang auf GPIO4 nicht durch abgeschaltete Peripherie gefährdet wird.
 - Die ESPHome-API bündelt Zustandsänderungen mit `batch_delay: 500ms`.
 - 15-Minuten-Diagnosewerte werden ereignisgesteuert beim Zählertelegramm veröffentlicht statt jede Sekunde.
-- `Alter der Zaehlerdaten` wird nur alle 10 Sekunden aktualisiert; `Datenstatus` alle 5 Sekunden.
+- `Alter der Zählerdaten` wird nur alle 10 Sekunden aktualisiert; `Datenstatus` alle 5 Sekunden.
 - Webserver, API, OTA und alle Messwerte bleiben verfügbar.
 
 Espressif empfiehlt für ESP32-C3-WLAN-Anwendungen die Kombination **Min Modem-sleep + DFS** mit 160 MHz Maximal- und 40 MHz Minimalfrequenz. In den Referenzmessungen liegt der mittlere Chipstrom bei DTIM1 mit dieser Kombination bei rund **11,35 mA**, gegenüber rund **21,47 mA ohne DFS**. Das sind Referenzwerte des ESP32-C3 und keine garantierte Leistungsaufnahme des kompletten Boards.
@@ -362,7 +364,7 @@ Oben in der YAML steht:
 main_fuse_a: "0"
 ```
 
-`0` bedeutet: unbekannt bzw. Sicherungsüberwachung deaktiviert.
+`0` bedeutet: unbekannt bzw. Sicherungsüberwachung deaktiviert. In diesem Fall bleibt die Entität `Hauptsicherung` bewusst unbekannt. Bei einem Wert größer als 0 wird der konfigurierte Sicherungswert beim Start einmal veröffentlicht.
 
 Beispiel für 25 A pro Phase:
 
@@ -379,8 +381,8 @@ main_fuse_a: "40"
 Dadurch werden diese Werte sinnvoll berechnet:
 
 - `Hauptsicherung Auslastung`
-- `Stromreserve schwaechste Phase`
-- `Phasenstrom ueber Sicherungsnennwert`
+- `Stromreserve schwächste Phase`
+- `Sicherungsgrenze Phasenstrom`
 
 ---
 
@@ -454,7 +456,7 @@ Für das Home-Assistant-Energy-Dashboard sind besonders geeignet:
 
 ```text
 Energie Bezug Gesamt
-Energie Ruecklieferung Gesamt
+Energie Rücklieferung Gesamt
 ```
 
 Beide werden in `kWh` mit `total_increasing` bereitgestellt.
@@ -513,7 +515,7 @@ Die YAML liest 30 numerische DLMS-Werte.
 Zusätzlich werden als Textwerte veröffentlicht:
 
 - `OBIS Listenkennung`
-- `Zaehler Uhr`
+- `Zähleruhr`
 
 ---
 
@@ -523,19 +525,19 @@ Zusätzlich werden als Textwerte veröffentlicht:
 | --- | --- |
 | Netzleistung saldiert | Bezug minus Rücklieferung; positiv = Bezug, negativ = Einspeisung |
 | Bezug saldiert | tatsächlich saldierter Bezug |
-| Ruecklieferung saldiert | tatsächlich saldierte Einspeisung als positiver Wert |
+| Rücklieferung saldiert | tatsächlich saldierte Einspeisung als positiver Wert |
 | Netzleistung L1/L2/L3 | Bezug minus Rücklieferung je Phase |
 | Netzleistung aus Phasen | Summe der drei saldierten Phasen |
 | Saldierungsabweichung | Differenz Gesamtwert ↔ Summe der Phasen |
-| Gleichzeitiger Bezug und Ruecklieferung | möglicher Überlappungswert |
+| Gleichzeitiger Bezug und Rücklieferung | möglicher Überlappungswert in W |
 | Stromsumme L1 L2 L3 | Summe aller Phasenströme |
-| Hoechster Phasenstrom | aktuell stärkste Phase |
+| Höchster Phasenstrom | aktuell stärkste Phase |
 | Phasenstrom Spreizung | höchster minus niedrigster Phasenstrom |
 | Scheinleistung Summe U x I | Summe von Spannung × Strom je Phase |
 | Hauptsicherung Auslastung | Belastung der stärksten Phase in % |
-| Stromreserve schwaechste Phase | Reserve bis zum eingestellten Sicherungswert |
+| Stromreserve schwächste Phase | Reserve bis zum eingestellten Sicherungswert |
 | Hauptsicherung | Eingestellter Sicherungswert |
-| Hoechstbelastete Phase | L1, L2 oder L3 |
+| Höchstbelastete Phase | L1, L2 oder L3 |
 
 ---
 
@@ -544,12 +546,12 @@ Zusätzlich werden als Textwerte veröffentlicht:
 Im RAM des ESP32 werden zusätzlich geführt:
 
 - Bezugsspitze seit Neustart
-- Ruecklieferspitze seit Neustart
+- Rücklieferspitze seit Neustart
 - Bezug Mittel 15 Minuten
-- Ruecklieferung Mittel 15 Minuten
-- Hoechstes 15-Minuten-Mittel seit Neustart
-- Empfangene Datensaetze seit Neustart
-- Alter der Zaehlerdaten
+- Rücklieferung Mittel 15 Minuten
+- Höchstes 15-Minuten-Mittel seit Neustart
+- Empfangene Datensätze seit Neustart
+- Alter der Zählerdaten
 - Letztes Empfangsintervall
 - Abdeckung 15-Minuten-Mittel
 
@@ -574,7 +576,7 @@ Bei fehlenden Daten:
 
 - direkte Messwerte werden nicht weiter als aktuell gehalten,
 - `Datenstatus` zeigt `Daten veraltet`,
-- `Zaehlerdaten aktuell` wird `Aus`,
+- `Zählerdaten aktuell` wird `Aus`,
 - die RGB-LED blinkt bei vorhandener WLAN-Verbindung blau.
 
 ---
@@ -587,8 +589,6 @@ Bei fehlenden Daten:
 - WLAN Signal Prozent
 - IP-Adresse
 - Verbundenes WLAN / SSID
-- WLAN Access Point BSSID
-- WLAN MAC-Adresse
 
 Grobe RSSI-Orientierung:
 
@@ -604,10 +604,6 @@ Grobe RSSI-Orientierung:
 
 - Chiptemperatur
 - Laufzeit
-- Freier Heap
-- Minimal freier Heap
-- Groesster freier Heap-Block
-- Maximale Loop-Zeit
 - Letzter Neustartgrund
 - ESPHome Version
 - ESPHome Verbindung
@@ -619,18 +615,19 @@ Die CPU läuft nicht dauerhaft mit 160 MHz: Durch das aktivierte ESP-IDF-DFS kan
 ## Zählerdiagnose
 
 - Datenstatus
-- Zaehlerdaten aktuell
-- Alter der Zaehlerdaten
+- Zählerdaten aktuell
+- Alter der Zählerdaten
 - Letztes Empfangsintervall
-- Empfangene Datensaetze seit Neustart
+- Empfangene Datensätze seit Neustart
 - Abdeckung 15-Minuten-Mittel
-- Phasenstrom ueber Sicherungsnennwert
-- Gleichzeitige Leistungsrichtungen
+- Sicherungsgrenze Phasenstrom (`Innerhalb Grenzwert`, `Überschritten`, `Nicht konfiguriert` oder `Keine aktuellen Daten`)
+- Status gleichzeitiger Bezug und Rücklieferung (`Erkannt`, `Nicht erkannt` oder `Keine aktuellen Daten`)
 
 ## Hardwarediagnose
 
-- AP-Taste
 - Software Neustart
+
+Der physische AP-Taster bleibt vollständig funktionsfähig, wird aber nicht als eigene Entität in Home Assistant oder der Weboberfläche veröffentlicht.
 
 ---
 
@@ -682,7 +679,7 @@ Prüfen:
 2. ist die Kundenschnittstelle vom Netzbetreiber aktiviert?
 3. ist der GPK60 korrekt?
 4. erscheinen im ESPHome-Log DLMS-Daten?
-5. wird `Alter der Zaehlerdaten` aktualisiert?
+5. wird `Alter der Zählerdaten` aktualisiert?
 
 ## RGB-LED blinkt rot
 
@@ -693,7 +690,7 @@ Wenn dein WLAN absichtlich geändert wurde oder nicht mehr verfügbar ist:
 1. USB-C anschließen,
 2. AP-Taster drücken,
 3. mit `gplugk-bkw Setup` verbinden,
-4. `192.168.4.1` öffnen.
+4. `192.168.4.1/setup` öffnen.
 
 ## Grün flackert regelmäßig, aber Home Assistant zeigt nichts
 
@@ -709,10 +706,6 @@ Dann funktioniert der grundsätzliche Datenempfang wahrscheinlich bereits. Prüf
 Prüfe:
 
 - Letzter Neustartgrund
-- Freier Heap
-- Minimal freier Heap
-- Groesster freier Heap-Block
-- Maximale Loop-Zeit
 - Versorgung über HAN bzw. testweise USB-C
 
 ## Gerät startet nach gleichzeitigem Drücken von AP und Reset nicht normal
