@@ -1,6 +1,6 @@
 # gPlugK BKW – ESPHome
 
-ESPHome-Konfiguration für den **gPlugK mit ESP32-C3** am BKW/Kamstrup-OMNIPOWER-Smart-Meter.
+ESPHome-Konfiguration für den **gPlugK V3.11 mit ESP32-C3** am BKW/Kamstrup-OMNIPOWER-Smart-Meter.
 
 Das Repository besteht nur aus normaler ESPHome-YAML. Es werden **keine lokalen oder externen Custom Components** benötigt. Die Zählerwerte werden mit dem nativen `dlms_meter` von ESPHome gelesen und über die ESPHome-API direkt an Home Assistant übertragen.
 
@@ -20,25 +20,16 @@ Das Repository besteht nur aus normaler ESPHome-YAML. Es werden **keine lokalen 
 - WLAN-, Speicher-, Temperatur- und Laufzeitdiagnose liefern
 - lokale ESPHome-Weboberfläche bereitstellen
 - OTA-Updates ermöglichen
-- die **echte RGB-LED des gPlugK** als Statusanzeige verwenden
-- den **physischen AP-Taster** verwenden
-- den **physischen Reset-Taster** unverändert als Hardware-Reset nutzen
+- die RGB-LED des Boards als Statusanzeige verwenden
+- den physischen AP-Taster auf GPIO9 verwenden
+- den physischen Reset-Taster unverändert als Hardware-Reset nutzen
+- den ESP32-C3 mit einem stromsparenden WLAN-/CPU-Profil betreiben
 
 ---
 
 # 1. Hardware und Pinbelegung
 
-Der gPlugK definiert folgende Pins:
-
-```text
-rL    = 5
- gL    = 6
- bL    = 7
- butA  = 9
- rxPin = 4
-```
-
-Daraus ergibt sich für diese ESPHome-Konfiguration:
+Dieses Projekt ist für die **gPlugK-V3.11-Platine mit ESP32-C3** ausgelegt.
 
 | Funktion | ESP32-C3 GPIO | ESPHome |
 | --- | ---: | --- |
@@ -47,9 +38,9 @@ Daraus ergibt sich für diese ESPHome-Konfiguration:
 | RGB-LED Grün | GPIO6 | Ausgang |
 | RGB-LED Blau | GPIO7 | Ausgang |
 | AP-Taster | GPIO9 | Eingang mit Pull-up, aktiv LOW |
-| Reset-Taster | kein GPIO in der Firmware erforderlich | Hardware-Reset |
+| Reset-Taster | kein Firmware-GPIO erforderlich | Hardware-Reset |
 
-Die Pins stehen ganz oben in `gplugk-bkw.yaml` und sollten für den gPlugK normalerweise **nicht verändert** werden:
+Die Pins stehen ganz oben in `gplugk-bkw.yaml` und sollten für diese Hardware normalerweise **nicht verändert** werden:
 
 ```yaml
 han_rx_pin: GPIO4
@@ -61,18 +52,7 @@ ap_button_pin: GPIO9
 
 ## UART-Einstellungen
 
-Die offizielle gPlugK-Anleitung nennt für die Kamstrup-CII:
-
-```text
-2400 Baud
-8 Datenbits
-keine Parität
-1 Stopbit
-```
-
-also **2400 Baud, 8N1**.
-
-Genau das ist in der YAML eingestellt:
+Die Kundenschnittstelle wird mit **2400 Baud, 8 Datenbits, keiner Parität und 1 Stopbit (8N1)** gelesen:
 
 ```yaml
 uart:
@@ -82,17 +62,30 @@ uart:
   data_bits: 8
   parity: NONE
   stop_bits: 1
+  rx_buffer_size: 4096
 ```
 
-Der größere ESPHome-Empfangspuffer von 4096 Byte ist absichtlich gewählt und ändert die elektrische Schnittstelle nicht.
+Der größere UART-Puffer bietet Reserve für komplette DLMS-Telegramme und verändert die elektrische Schnittstelle nicht.
+
+## Skalierung der Kamstrup-Werte
+
+Die YAML bildet die Rohwerte in die Einheiten um, die Home Assistant erwartet:
+
+| Wert | Umrechnung in der YAML | Ergebnis |
+| --- | ---: | --- |
+| Wirk-/Blindenergie | × 0,001 | kWh / kvarh |
+| Strom | × 0,01 | A |
+| Leistungsfaktor | × 0,01 | Verhältnis 0…1 |
+| Spannung | × 1 | V |
+| Wirk-/Blindleistung | × 1 | W / var |
+
+Der optionale `ct_factor` wird anschließend auf Energie, Strom und Leistung angewendet. Spannung und Leistungsfaktor bleiben davon unberührt.
 
 ---
 
 # 2. RGB-LED
 
-Der gPlugK besitzt keine einfache einfarbige LED, sondern eine **RGB-LED mit drei getrennten GPIOs**.
-
-Die ESPHome-Konfiguration übernimmt die Bedeutung der LED aus der offiziellen Anleitung:
+Die V3.11 besitzt eine **RGB-LED mit drei getrennten GPIOs**. Die ESPHome-Konfiguration verwendet sie als kompakte Statusanzeige:
 
 | LED | Bedeutung |
 | --- | --- |
@@ -113,21 +106,13 @@ Zählerdaten fehlen/veraltet → Blau
 Datenempfang → kurzer grüner Impuls
 ```
 
-Damit entstehen bei mehreren gleichzeitigen Problemen keine schwer lesbaren Mischfarben.
-
-### Typisches Verhalten
-
-Bei normalem Betrieb sieht man ungefähr alle 10 Sekunden einen kurzen grünen Impuls, weil der Kamstrup-Zähler seine Daten üblicherweise in diesem Intervall sendet.
-
-Wenn WLAN fehlt, blinkt Rot ungefähr alle 9 Sekunden.
-
-Wenn WLAN vorhanden ist, aber keine aktuellen Zählerdaten ankommen, blinkt Blau ungefähr alle 15 Sekunden.
+Damit entstehen bei mehreren gleichzeitigen Zuständen keine schwer lesbaren Mischfarben. Bei normalem Betrieb ist ungefähr im Takt der Zählertelegramme ein kurzer grüner Impuls zu sehen.
 
 ---
 
 # 3. AP-Taster
 
-Der auf der Platine mit **AP** bezeichnete Taster ist in ESPHome so definiert:
+Der auf der Platine mit **AP** bezeichnete Taster liegt auf GPIO9 und wird als aktiver LOW-Eingang mit internem Pull-up verwendet:
 
 ```yaml
 pin:
@@ -138,7 +123,7 @@ pin:
   inverted: true
 ```
 
-Ein Druck auf die Taste aktiviert den konfigurierten ESPHome-Setup-Access-Point, **wenn keine normale WLAN-Verbindung besteht**.
+Ein Druck auf die Taste aktiviert den ESPHome-Setup-Access-Point, **wenn keine normale WLAN-Verbindung besteht**.
 
 Der Access Point heißt standardmäßig:
 
@@ -146,108 +131,81 @@ Der Access Point heißt standardmäßig:
 gplugk-bkw Setup
 ```
 
-Das Passwort ist der Wert `fallback_password` aus deiner `secrets.yaml`.
-
-Danach kannst du dich mit Smartphone oder Notebook mit diesem WLAN verbinden. Falls das Captive Portal nicht automatisch erscheint, öffne:
+Das Passwort ist der Wert `fallback_password` aus `secrets.yaml`. Falls das Captive Portal nicht automatisch erscheint, öffne:
 
 ```text
 http://192.168.4.1/
 ```
 
-Dort können neue WLAN-Zugangsdaten gespeichert werden. Sobald wieder eine normale WLAN-Verbindung besteht, wird der manuell freigegebene AP-Timeout wieder auf `0s` gesetzt.
+In der YAML steht absichtlich `ap_timeout: 0s`. Der Setup-AP läuft damit nicht unnötig im normalen Betrieb, sondern wird bei Bedarf über den Taster freigegeben. Für längere Einrichtung oder Flash-Vorgänge ist eine zusätzliche Versorgung über USB-C sinnvoll.
 
-## Warum startet der Access Point nicht automatisch?
-
-In der YAML steht:
-
-```yaml
-ap_timeout: 0s
-```
-
-Das ist absichtlich so gewählt. Wir vermeiden einen automatisch dauerhaft gestarteten AP, weil der Access-Point-Betrieb zusätzliche Leistung benötigt. Der gPlugK wird im normalen Betrieb über die Kundenschnittstelle des Zählers versorgt, deren Leistungsreserve begrenzt sein kann.
-
-Der physische AP-Taster übernimmt deshalb die Wiederherstellungsfunktion.
-
-> **Tipp:** Für WLAN-Einrichtung, längeren AP-Betrieb und insbesondere beim Flashen den gPlugK am besten zusätzlich über **USB-C** versorgen. Das wird auch in der offiziellen gPlugK-Anleitung empfohlen.
-
-## Wenn das normale WLAN noch funktioniert
-
-Der AP-Taster unterbricht eine bestehende WLAN-Verbindung absichtlich nicht. Wenn du bei funktionierendem WLAN SSID oder Passwort ändern möchtest, ist es sauberer, `secrets.yaml` anzupassen und die Firmware per OTA neu zu installieren.
-
-Wenn das alte WLAN nicht mehr verfügbar ist, drückst du einfach den AP-Taster und verwendest das Captive Portal.
+Wenn das normale WLAN noch funktioniert, unterbricht der AP-Taster die bestehende Verbindung nicht. WLAN-Daten können dann bequem in `secrets.yaml` geändert und per OTA installiert werden.
 
 ---
 
 # 4. Wichtiger Hinweis zu GPIO9
 
-GPIO9 ist beim ESP32-C3 gleichzeitig ein **Boot-/Strapping-Pin**.
-
-Im normalen laufenden Betrieb darf er problemlos als Tastereingang benutzt werden. Genau deshalb wird der vorhandene Hardwaretaster mit internem Pull-up als aktiver LOW-Eingang verwendet.
+GPIO9 ist beim ESP32-C3 gleichzeitig ein **Boot-/Strapping-Pin**. Im laufenden Betrieb kann er problemlos als Tastereingang verwendet werden.
 
 Halte den AP-Taster aber **nicht während eines normalen Reset- oder Einschaltvorgangs gedrückt**, außer du möchtest bewusst den ESP32-C3 in den Firmware-Download-Modus bringen. Ein LOW-Pegel auf GPIO9 während des Resets kann den Bootloader-Modus auswählen.
 
-Diese Warnung wird in der YAML bewusst mit
+Die YAML quittiert die entsprechende ESPHome-Warnung deshalb bewusst mit:
 
 ```yaml
 ignore_strapping_warning: true
 ```
 
-quittiert, weil GPIO9 auf dieser Hardware absichtlich als Taster genutzt wird.
-
 ---
 
 # 5. Reset-Taster
 
-Der zweite physische Taster auf der Front ist der **Reset-Taster**.
+Der zweite physische Taster ist der **Reset-Taster**. Er wirkt hardwareseitig auf den ESP32-C3 und benötigt deshalb keinen ESPHome-`binary_sensor`. Ein kurzer Druck startet den Controller unabhängig von WLAN und Home Assistant neu.
 
-Die offizielle gPlugK-Konfiguration weist diesem Taster keinen normalen GPIO zu. Für seine eigentliche Reset-Funktion ist deshalb **kein ESPHome-`binary_sensor` notwendig**.
-
-Ein kurzer Druck startet den ESP32 neu, unabhängig davon, ob Home Assistant oder WLAN erreichbar sind.
-
-Zusätzlich stellt ESPHome in der Weboberfläche und in Home Assistant den Button
-
-```text
-Software Neustart
-```
-
-bereit. Damit kann derselbe praktische Effekt auch aus der Ferne ausgelöst werden.
+Zusätzlich stellt ESPHome in der Weboberfläche und in Home Assistant den Button `Software Neustart` bereit.
 
 ---
 
 # 6. Energieversorgung und Low-Power-Profil
 
-Die Kamstrup-HAN-Schnittstelle ist leistungsmässig knapp dimensioniert. Kamstrup spezifiziert für das angeschlossene HEMS maximal **144 mW** beziehungsweise **6 mA (4 Unit Loads nach EN 13757-2)**. Die offizielle gPlugK-Seite weist zudem darauf hin, dass HW V3.11 gegenüber den älteren Versionen um eine **Strombegrenzung** ergänzt wurde. Der grosse Superkondensator auf der V3.11-Platine puffert die kurzzeitigen Lastspitzen des ESP32-C3, insbesondere beim WLAN-Senden.
+Die Kamstrup-HAN-Schnittstelle ist leistungsmäßig knapp dimensioniert. Kamstrup spezifiziert für ein angeschlossenes HEMS maximal **144 mW** beziehungsweise **6 mA (4 Unit Loads nach EN 13757-2)**. Der Superkondensator auf dem Board dient als Energiepuffer für kurzzeitige Lastspitzen, insbesondere beim WLAN-Senden.
 
-Die ESPHome-Konfiguration verwendet deshalb bewusst ein konservatives Energiesparprofil:
+Die ESPHome-Konfiguration ist deshalb auf niedrigen Durchschnittsverbrauch ausgelegt:
 
 - **ESP-IDF Dynamic Frequency Scaling (DFS)** ist aktiviert.
 - Maximale CPU-Frequenz: **160 MHz**.
 - Im Leerlauf kann ESP-IDF bis auf die **40-MHz-XTAL-Frequenz** heruntertakten.
-- WLAN verwendet `power_save_mode: light`, was bei ESP32/ESP-IDF dem **WIFI_PS_MIN_MODEM**-Modus entspricht.
-- Der ESP32 bleibt mit dem WLAN verbunden.
-- **Auto-Light-Sleep wird absichtlich nicht aktiviert**, damit der asynchrone DLMS-UART-Empfang auf GPIO4 nicht während eines Schlafzustands verpasst werden kann.
-- Die ESPHome-API bündelt Zustandsänderungen mit `batch_delay: 500ms`, damit die vielen Werte eines DLMS-Telegramms möglichst in wenigen WLAN-Paketen übertragen werden.
-- Webserver, API, OTA und die vollständigen Messwerte bleiben verfügbar.
+- WLAN verwendet `power_save_mode: light` bzw. **WIFI_PS_MIN_MODEM**.
+- `post_connect_roaming: false` verhindert bei diesem stationären Gerät periodische WLAN-Roaming-Scans.
+- **Auto-Light-Sleep ist nicht aktiviert**, damit der kontinuierliche DLMS-UART-Empfang auf GPIO4 nicht durch abgeschaltete Peripherie gefährdet wird.
+- Die ESPHome-API bündelt Zustandsänderungen mit `batch_delay: 500ms`.
+- 15-Minuten-Diagnosewerte werden ereignisgesteuert beim Zählertelegramm veröffentlicht statt jede Sekunde.
+- `Alter der Zaehlerdaten` wird nur alle 10 Sekunden aktualisiert; `Datenstatus` alle 5 Sekunden.
+- Webserver, API, OTA und alle Messwerte bleiben verfügbar.
 
-Espressif empfiehlt für ESP32-C3-WLAN-Anwendungen ausdrücklich die Kombination **Min Modem-sleep + DFS**. In den Referenzmessungen von Espressif sinkt der mittlere Chipstrom bei DTIM 1 von rund **21,47 mA ohne DFS auf 11,35 mA mit DFS**. Diese Messwerte sind keine garantierte Leistungsaufnahme des kompletten gPlugK, zeigen aber, weshalb DFS für diese Anwendung sinnvoll ist.
+Espressif empfiehlt für ESP32-C3-WLAN-Anwendungen die Kombination **Min Modem-sleep + DFS** mit 160 MHz Maximal- und 40 MHz Minimalfrequenz. In den Referenzmessungen liegt der mittlere Chipstrom bei DTIM1 mit dieser Kombination bei rund **11,35 mA**, gegenüber rund **21,47 mA ohne DFS**. Das sind Referenzwerte des ESP32-C3 und keine garantierte Leistungsaufnahme des kompletten Boards.
 
-Das originale gPlugK reduziert die CPU ebenfalls aus Energiespargründen und nennt für 160 → 80 MHz eine Einsparung von ungefähr einem Drittel. ESPHome nutzt hier stattdessen DFS: Leistung steht bei Bedarf bis 160 MHz zur Verfügung, während der Takt in Leerlaufphasen automatisch sinkt.
+## Warum `power_save_mode: high` nicht Standard ist
 
-### Warum `power_save_mode: high` nicht Standard ist
+Der aggressivere Modus kann noch stärker sparen, erhöht aber die Netzwerklatenz und kann Broadcast-/Multicast-Verkehr ungünstiger behandeln. Für einen dauerhaft erreichbaren Home-Assistant-Sensor ist `light` die robustere Grundeinstellung.
 
-ESPHome bietet zusätzlich `high` an. Das entspricht unter ESP-IDF `WIFI_PS_MAX_MODEM` und kann noch stärker sparen, erhöht aber die Latenz und kann Broadcast-/Multicast-Pakete verpassen. ESPHome weist zudem darauf hin, dass der höchste Energiesparmodus die WLAN-Zuverlässigkeit verschlechtern kann. Für einen dauerhaft erreichbaren Home-Assistant-Sensor ist `light` deshalb die robustere Grundeinstellung.
+## Warum die WLAN-Sendeleistung nicht pauschal reduziert wird
 
-### Warum die WLAN-Sendeleistung nicht fest reduziert wird
+ESPHome erlaubt eine feste maximale `output_power`. Im Zählerschrank kann das WLAN-Signal aber stark gedämpft sein. Eine zu niedrige Sendeleistung kann Wiederholungen und Reconnects verursachen und damit Zuverlässigkeit und Energieverbrauch verschlechtern. Deshalb bleibt die Sendeleistung in der Standardkonfiguration unverändert.
 
-Das originale gPlugK-Script nutzt eine dynamische WLAN-Sendeleistung. ESPHome bietet in der YAML dagegen eine feste maximale `output_power`-Vorgabe. Eine pauschale Reduktion wäre im Zählerschrank riskant: Bei schwachem Empfang können Wiederholungen und Reconnects den Energieverbrauch sogar erhöhen. Deshalb bleibt die Sendeleistung automatisch/default.
+## Warum WLAN-Roaming deaktiviert ist
 
-Wenn der gPlugK am endgültigen Einbauort dauerhaft besser als ungefähr **-60 dBm** empfängt, kann eine reduzierte maximale Sendeleistung später separat getestet werden. Für die Standardkonfiguration ist das nicht erforderlich.
+ESPHome aktiviert `post_connect_roaming` standardmäßig. Dabei kann ein verbundenes Gerät nach besseren Access Points mit derselben SSID suchen. Der gPlugK ist stationär; solche Scans bringen hier normalerweise keinen Nutzen, erzeugen aber zusätzliche Funkaktivität. Deshalb ist gesetzt:
 
-Quellen:
+```yaml
+wifi:
+  post_connect_roaming: false
+```
+
+Weiterführende technische Dokumentation:
 
 - Kamstrup HAN module data sheet: https://kamstrup-delivery.sitecorecontenthub.cloud/api/public/content/60724-downloadOriginal?v=3794f2c2
 - ESPHome WiFi: https://esphome.io/components/wifi/
-- Espressif ESP32-C3 Low Power WiFi: https://docs.espressif.com/projects/esp-idf/en/v5.5/esp32c3/api-guides/low-power-mode/low-power-mode-wifi.html
+- Espressif ESP32-C3 Power Management: https://docs.espressif.com/projects/esp-idf/en/v5.5/esp32c3/api-guides/low-power-mode/low-power-mode-wifi.html
 
 ---
 

@@ -6,7 +6,7 @@ substitutions:
   device_name: gplugk-bkw
   friendly_name: gPlugK
 
-  # gPlugK HW 2.x und 3.x
+  # gPlugK V3.11 - Hardware-Pinbelegung
   han_rx_pin: GPIO4
   led_red_pin: GPIO5
   led_green_pin: GPIO6
@@ -63,14 +63,17 @@ wifi:
   ssid: !secret wifi_ssid
   password: !secret wifi_password
   power_save_mode: light
+  # Stationaeres Geraet: keine periodischen Roaming-Scans. Das spart WLAN-
+  # Aktivitaet und vermeidet unnoetige Lastspitzen im knappen Leistungsbudget.
+  post_connect_roaming: false
   reboot_timeout: 0s
   on_connect:
     - lambda: id(gplugk_wifi).set_ap_timeout(0);
   ap:
     ssid: "${device_name} Setup"
     password: !secret fallback_password
-    # Wie im aktuell publizierten gPlugK-Script kein automatischer Fallback-AP.
-    # Der physische AP-Taster auf GPIO9 aktiviert ihn bei Bedarf.
+    # Kein automatischer Fallback-AP: SoftAP-Betrieb benoetigt deutlich mehr
+    # WLAN-Aktivitaet. Der physische AP-Taster auf GPIO9 aktiviert ihn bei Bedarf.
     ap_timeout: 0s
 
 captive_portal:
@@ -189,8 +192,8 @@ globals:
     restore_value: no
     initial_value: '0'
 
-# Die gPlugK-RGB-LED besteht aus drei getrennten
-# aktiven High-Ausgaengen: Rot=GPIO5, Gruen=GPIO6, Blau=GPIO7.
+# Die RGB-LED der V3.11 besitzt drei getrennte aktive High-Ausgaenge:
+# Rot=GPIO5, Gruen=GPIO6, Blau=GPIO7.
 output:
   - platform: gpio
     id: status_led_red
@@ -364,6 +367,9 @@ script:
           id(peak_mean_import_15min).publish_state(peak_mean_import);
           id(received_sets_sensor).publish_state(id(received_sets_count));
           id(last_interval_sensor).publish_state(id(last_interval_s_value));
+          id(mean_import_15min).publish_state(mean_import);
+          id(mean_export_15min).publish_state(mean_export);
+          id(window_coverage_sensor).publish_state(id(window_coverage_s_value));
 
           have_previous = !isnan(import_now);
           previous_ms = now;
@@ -412,7 +418,7 @@ sensor:
     state_class: total_increasing
     accuracy_decimals: 3
     filters:
-      - multiply: 0.01
+      - multiply: 0.001
       - multiply: ${ct_factor}
       - timeout: ${stale_after}
     on_raw_value:
@@ -431,7 +437,7 @@ sensor:
     state_class: total_increasing
     accuracy_decimals: 3
     filters:
-      - multiply: 0.01
+      - multiply: 0.001
       - multiply: ${ct_factor}
       - timeout: ${stale_after}
     web_server:
@@ -445,7 +451,7 @@ sensor:
     state_class: total_increasing
     accuracy_decimals: 3
     filters:
-      - multiply: 0.01
+      - multiply: 0.001
       - multiply: ${ct_factor}
       - timeout: ${stale_after}
     web_server:
@@ -459,7 +465,7 @@ sensor:
     state_class: total_increasing
     accuracy_decimals: 3
     filters:
-      - multiply: 0.01
+      - multiply: 0.001
       - multiply: ${ct_factor}
       - timeout: ${stale_after}
     web_server:
@@ -764,7 +770,7 @@ sensor:
     state_class: total_increasing
     accuracy_decimals: 3
     filters:
-      - multiply: 0.01
+      - multiply: 0.001
       - multiply: ${ct_factor}
       - timeout: ${stale_after}
     web_server:
@@ -779,7 +785,7 @@ sensor:
     state_class: total_increasing
     accuracy_decimals: 3
     filters:
-      - multiply: 0.01
+      - multiply: 0.001
       - multiply: ${ct_factor}
       - timeout: ${stale_after}
     web_server:
@@ -794,7 +800,7 @@ sensor:
     state_class: total_increasing
     accuracy_decimals: 3
     filters:
-      - multiply: 0.01
+      - multiply: 0.001
       - multiply: ${ct_factor}
       - timeout: ${stale_after}
     web_server:
@@ -809,7 +815,7 @@ sensor:
     state_class: total_increasing
     accuracy_decimals: 3
     filters:
-      - multiply: 0.01
+      - multiply: 0.001
       - multiply: ${ct_factor}
       - timeout: ${stale_after}
     web_server:
@@ -824,7 +830,7 @@ sensor:
     state_class: total_increasing
     accuracy_decimals: 3
     filters:
-      - multiply: 0.01
+      - multiply: 0.001
       - multiply: ${ct_factor}
       - timeout: ${stale_after}
     web_server:
@@ -840,7 +846,7 @@ sensor:
     state_class: total_increasing
     accuracy_decimals: 3
     filters:
-      - multiply: 0.01
+      - multiply: 0.001
       - multiply: ${ct_factor}
       - timeout: ${stale_after}
     on_raw_value:
@@ -849,7 +855,7 @@ sensor:
     web_server:
       sorting_group_id: group_energy
 
-  # --- Berechnete Werte ----------------------------------------------------
+  # --- Berechnete Werte -----------------------------------------------------
   # Bezug ist positiv, Ruecklieferung negativ. Die Berechnungen verwenden
   # ausschliesslich die oben empfangenen und bereits skalierten Zaehlerwerte.
   - platform: template
@@ -1116,10 +1122,7 @@ sensor:
     device_class: power
     state_class: measurement
     accuracy_decimals: 0
-    update_interval: 1s
-    lambda: |-
-      if (id(last_data_ms) == 0 || uint32_t(millis() - id(last_data_ms)) >= ${stale_after_ms}) return NAN;
-      return id(mean_import_15min_value);
+    update_interval: never
     web_server:
       sorting_group_id: group_diagnostics
 
@@ -1130,10 +1133,7 @@ sensor:
     device_class: power
     state_class: measurement
     accuracy_decimals: 0
-    update_interval: 1s
-    lambda: |-
-      if (id(last_data_ms) == 0 || uint32_t(millis() - id(last_data_ms)) >= ${stale_after_ms}) return NAN;
-      return id(mean_export_15min_value);
+    update_interval: never
     web_server:
       sorting_group_id: group_diagnostics
 
@@ -1166,7 +1166,7 @@ sensor:
     state_class: measurement
     accuracy_decimals: 0
     entity_category: diagnostic
-    update_interval: 1s
+    update_interval: 10s
     lambda: |-
       if (id(last_data_ms) == 0) return NAN;
       return uint32_t(millis() - id(last_data_ms)) / 1000.0f;
@@ -1193,10 +1193,7 @@ sensor:
     state_class: measurement
     accuracy_decimals: 0
     entity_category: diagnostic
-    update_interval: 1s
-    lambda: |-
-      if (id(last_data_ms) == 0 || uint32_t(millis() - id(last_data_ms)) >= ${stale_after_ms}) return 0.0f;
-      return id(window_coverage_s_value);
+    update_interval: never
     web_server:
       sorting_group_id: group_diagnostics
 
@@ -1330,7 +1327,7 @@ text_sensor:
     name: "Datenstatus"
     id: data_status
     entity_category: diagnostic
-    update_interval: 1s
+    update_interval: 5s
     lambda: |-
       if (id(last_data_ms) == 0) return {"Warte auf Zaehlerdaten"};
       if (uint32_t(millis() - id(last_data_ms)) >= ${stale_after_ms}) return {"Daten veraltet"};
@@ -1345,7 +1342,8 @@ binary_sensor:
     web_server:
       sorting_group_id: group_diagnostics
 
-  # Physischer AP-Taster des gPlugK. GPIO9 ist beim ESP32-C3 zugleich ein Boot-Strap-Pin.
+  # Physischer AP-Taster auf GPIO9 mit internem Pull-up. GPIO9 ist beim
+  # ESP32-C3 zugleich ein Boot-Strap-Pin.
   - platform: gpio
     id: ap_mode_button
     name: "AP-Taste"
@@ -1373,6 +1371,15 @@ binary_sensor:
     entity_category: diagnostic
     lambda: |-
       return id(last_data_ms) != 0 && uint32_t(millis() - id(last_data_ms)) < ${stale_after_ms};
+    on_release:
+      then:
+        # Diese Werte werden sonst nur bei einem neuen Telegramm publiziert.
+        # Beim Veralten einmal gezielt auf unbekannt/0 setzen, statt jede
+        # Sekunde unveraenderte Diagnosewerte ueber WLAN zu senden.
+        - lambda: |-
+            id(mean_import_15min).publish_state(NAN);
+            id(mean_export_15min).publish_state(NAN);
+            id(window_coverage_sensor).publish_state(0.0f);
     web_server:
       sorting_group_id: group_diagnostics
 
@@ -1400,7 +1407,8 @@ binary_sensor:
       sorting_group_id: group_diagnostics
 
 
-# Software-Gegenstueck zum physischen Reset-Taster. 
+# Software-Gegenstueck zum physischen Reset-Taster. Der Hardware-Reset wirkt
+# direkt auf den ESP32-C3 und benoetigt deshalb keinen ESPHome-GPIO-Eintrag.
 button:
   - platform: restart
     name: "Software Neustart"
