@@ -272,7 +272,6 @@ wifi_password: "MeinWLANPasswort"
 fallback_password: "MeinSetupPasswort"
 
 api_key: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
-ota_password: "MeinOTAPasswort"
 
 web_username: "admin"
 web_password: "MeinWebPasswort"
@@ -737,7 +736,6 @@ Folgende Werte niemals veröffentlichen:
 - GPK60
 - GPK61
 - ESPHome API-Key
-- OTA-Passwort
 - Passwort der Weboberfläche
 
 Genau deshalb liegt nur `secrets.example.yaml` im Repository.
@@ -770,7 +768,6 @@ wifi_ssid: "MeinWLAN"
 wifi_password: "MeinWLANPasswort"
 fallback_password: "MeinSetupPasswort"
 api_key: "MEIN_API_KEY"
-ota_password: "MeinOTAPasswort"
 web_username: "admin"
 web_password: "MeinWebPasswort"
 bkw_gpk60: "MEIN_32_STELLIGER_HEX_SCHLUESSEL"

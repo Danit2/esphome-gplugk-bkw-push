@@ -89,7 +89,7 @@ api:
 
 ota:
   - platform: esphome
-    password: !secret ota_password
+    encryption:
   - platform: web_server
 
 web_server:
