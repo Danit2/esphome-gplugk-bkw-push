@@ -11,8 +11,8 @@ Das Repository besteht nur aus normaler ESPHome-YAML. Es werden **keine lokalen 
 ## Was die Konfiguration kann
 
 - BKW/Kamstrup-DLMS über die HAN/CII-Schnittstelle lesen
-- verschlüsselte Telegramme mit GPK60 entschlüsseln
-- optional GPK61 für Authentifizierung verwenden
+- verschlüsselte Telegramme mit dem BKW-GPK60 (`bkw_encryption`) entschlüsseln
+- den GPK61-Authentifizierungsschlüssel (`bkw_auth`) über `auth_key` bereitstellen
 - 30 direkte Zählerwerte an Home Assistant senden
 - saldierte Leistungs-, Strom- und Sicherungswerte berechnen
 - zeitgewichtete 15-Minuten-Mittel berechnen
@@ -40,7 +40,7 @@ Dieses Projekt ist für die **gPlugK-V3.11-Platine mit ESP32-C3** ausgelegt.
 | AP-Taster | GPIO9 | Eingang mit Pull-up, aktiv LOW |
 | Reset-Taster | kein Firmware-GPIO erforderlich | Hardware-Reset |
 
-Die Pins stehen ganz oben in `gplugk-bkw.yaml` und sollten für diese Hardware normalerweise **nicht verändert** werden:
+Die folgende Tabelle beschreibt die **in dieser Firmware konfigurierte** Pinbelegung. Sie ersetzt keine Prüfung der tatsächlichen Platinenverdrahtung (insbesondere HAN-RX/ggf. DATA_IN bei anderen Lesemodi). Die Pins stehen ganz oben in `gplugk-bkw.yaml` und sollten nur nach Prüfung der Hardware verändert werden:
 
 ```yaml
 han_rx_pin: GPIO4
@@ -63,9 +63,10 @@ uart:
   parity: NONE
   stop_bits: 1
   rx_buffer_size: 4096
+  clock_source: XTAL
 ```
 
-Der größere UART-Puffer bietet Reserve für komplette DLMS-Telegramme und verändert die elektrische Schnittstelle nicht.
+Der größere UART-Puffer bietet Reserve für längere DLMS-Telegramme und verändert die elektrische Schnittstelle nicht. **`clock_source: XTAL` ist hier wichtig:** Mit aktivem Dynamic Frequency Scaling kann der APB-Takt schwanken; der vom CPU-Takt unabhängige XTAL-UART-Takt hält die 2400 Baud stabil. Der tatsächliche physische Anschluss der Kamstrup-Schnittstelle muss zur gPlugK-Hardware passen.
 
 ## Skalierung der Kamstrup-Werte
 
@@ -90,7 +91,7 @@ Die V3.11 besitzt eine **RGB-LED mit drei getrennten GPIOs**. Die ESPHome-Konfig
 | LED | Bedeutung |
 | --- | --- |
 | Rot → Grün → Blau einmal beim Start | Firmware wurde gestartet |
-| Grün flackert kurz | Zählertelegramm wurde empfangen |
+| Grün flackert kurz | mindestens der Bezug-Gesamt-OBIS-Wert wurde vom Parser empfangen |
 | Blau blinkt | keine aktuellen Smart-Meter-Daten |
 | Rot blinkt | keine Verbindung zum lokalen WLAN |
 
@@ -174,17 +175,17 @@ Die Kamstrup-HAN-Schnittstelle ist leistungsmäßig knapp dimensioniert. Kamstru
 Die ESPHome-Konfiguration ist deshalb auf niedrigen Durchschnittsverbrauch ausgelegt:
 
 - **ESP-IDF Dynamic Frequency Scaling (DFS)** ist aktiviert.
-- Maximale CPU-Frequenz: **160 MHz**.
-- Im Leerlauf kann ESP-IDF bis auf die **40-MHz-XTAL-Frequenz** heruntertakten.
+- Konfigurierte maximale CPU-Frequenz: **80 MHz** (`cpu_frequency: 80MHz`).
+- Mit aktivem DFS kann ESP-IDF zwischen **40 MHz (XTAL)** und **80 MHz (konfiguriertes Maximum)** wechseln, sofern keine Frequenzsperre aktiv ist.
 - WLAN verwendet `power_save_mode: light` bzw. **WIFI_PS_MIN_MODEM**.
-- `post_connect_roaming: false` verhindert bei diesem stationären Gerät periodische WLAN-Roaming-Scans.
+- `post_connect_roaming: false` vermeidet die zusätzlichen Nachverbindungs-Roamingprüfungen.
 - **Auto-Light-Sleep ist nicht aktiviert**, damit der kontinuierliche DLMS-UART-Empfang auf GPIO4 nicht durch abgeschaltete Peripherie gefährdet wird.
 - Die ESPHome-API bündelt Zustandsänderungen mit `batch_delay: 500ms`.
 - 15-Minuten-Diagnosewerte werden ereignisgesteuert beim Zählertelegramm veröffentlicht statt jede Sekunde.
 - `Alter der Zählerdaten` wird nur alle 10 Sekunden aktualisiert; `Datenstatus` alle 5 Sekunden.
 - Webserver, API, OTA und alle Messwerte bleiben verfügbar.
 
-Espressif empfiehlt für ESP32-C3-WLAN-Anwendungen die Kombination **Min Modem-sleep + DFS** mit 160 MHz Maximal- und 40 MHz Minimalfrequenz. In den Referenzmessungen liegt der mittlere Chipstrom bei DTIM1 mit dieser Kombination bei rund **11,35 mA**, gegenüber rund **21,47 mA ohne DFS**. Das sind Referenzwerte des ESP32-C3 und keine garantierte Leistungsaufnahme des kompletten Boards.
+Espressif beschreibt **Modem-Sleep + DFS** als Möglichkeit zum Stromsparen. Die Original-Referenzmessungen beziehen sich jedoch auf konkrete Testaufbauten, WLAN-DTIM-Einstellungen und zum Teil **160 MHz Maximalfrequenz**. Daraus lässt sich **kein garantierter Verbrauch** für diesen gPlugK mit 80-MHz-Konfiguration und aktivem Webserver ableiten. Entscheidend ist eine Messung am gesamten Board unter realen Empfangs- und WLAN-Bedingungen.
 
 ## Warum `power_save_mode: high` nicht Standard ist
 
@@ -196,7 +197,7 @@ ESPHome erlaubt eine feste maximale `output_power`. Im Zählerschrank kann das W
 
 ## Warum WLAN-Roaming deaktiviert ist
 
-ESPHome aktiviert `post_connect_roaming` standardmäßig. Dabei kann ein verbundenes Gerät nach besseren Access Points mit derselben SSID suchen. Der gPlugK ist stationär; solche Scans bringen hier normalerweise keinen Nutzen, erzeugen aber zusätzliche Funkaktivität. Deshalb ist gesetzt:
+ESPHome kann nach dem Verbinden noch bis zu drei Prüfungen auf bessere Access Points derselben SSID durchführen. Beim stationären gPlugK ist das nicht immer nötig. Deshalb ist in diesem Projekt die Option deaktiviert; in Netzen mit **mehreren Access Points** kann das allerdings nach AP-Ausfällen auch zu einer länger anhaltenden Verbindung mit einem schwächeren AP führen:
 
 ```yaml
 wifi:
@@ -220,7 +221,7 @@ Du benötigst:
 3. technischen Datensatz bzw. Schlüssel deines Netzbetreibers
 4. BKW-GPK60, falls das Telegramm verschlüsselt ist
 5. 2,4-GHz-WLAN
-6. ESPHome **2026.8.2 oder neuer**
+6. ESPHome **2026.9.0 oder neuer**
 7. für die Erstinstallation möglichst ein USB-C-Kabel
 
 ---
@@ -249,7 +250,7 @@ secrets.yaml
 
 ## Schritt 1 – Dateien kopieren
 
-Lade dieses Repository herunter und kopiere die Dateien in deinen ESPHome-Konfigurationsordner.
+Lade dieses Repository herunter und lege `gplugk-bkw.yaml` und `secrets.example.yaml` **im gleichen ESPHome-Konfigurationsordner** ab. Im Home-Assistant-ESPHome-Add-on ist das üblicherweise `/config/esphome/`; bei anderer Installation kann der Pfad abweichen. Falls dort bereits eine `secrets.yaml` liegt, deren vorhandene Inhalte **nicht überschreiben**, sondern die unten gezeigten fehlenden Schlüssel ergänzen.
 
 ## Schritt 2 – `secrets.yaml` anlegen
 
@@ -265,63 +266,63 @@ und benenne die Kopie um in:
 secrets.yaml
 ```
 
-Beispiel:
+Die folgende **vollständige Vorlage entspricht genau der aktuellen `secrets.example.yaml`** (alle Werte sind Platzhalter, keine gültigen Zugangsdaten):
 
 ```yaml
-wifi_ssid: "MeinWLAN"
-wifi_password: "MeinWLANPasswort"
+wifi_ssid: "YOUR_WIFI_SSID"
+wifi_password: "YOUR_WIFI_PASSWORD"
 
-fallback_password: "MeinSetupPasswort"
+# Mindestens 8 Zeichen für den Setup-Access-Point.
+fallback_password: "CHANGE_ME_FALLBACK"
 
+# 32 Byte, Base64-kodiert (typischerweise 44 Zeichen).
 api_key: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
 
+# Lokale Weboberfläche (HTTP Digest).
 web_username: "admin"
-web_password: "MeinWebPasswort"
+web_password: "CHANGE_ME_WEB"
 
-bkw_gpk60: "00112233445566778899AABBCCDDEEFF"
+# BKW GPK60: 16 Byte, exakt 32 Hex-Zeichen.
+bkw_encryption: "00112233445566778899AABBCCDDEEFF"
+
+# BKW GPK61: 16 Byte, exakt 32 Hex-Zeichen.
+bkw_auth: "FFEEDDCCBBAA99887766554433221100"
 ```
 
-Ersetze selbstverständlich alle Beispielwerte durch deine eigenen Werte.
+**Wichtig:** Alle Platzhalter ersetzen, insbesondere den `api_key`: `AAAAAAAA...=` ist nur formal gültig, aber **kein sicherer Schlüssel**. Du kannst einen echten API-Key mit dem ESPHome-Schlüsselgenerator erzeugen oder mit der Kommandozeile:
 
-> `secrets.yaml` niemals auf GitHub hochladen. Darin stehen WLAN-Passwort, API-Key und dein persönlicher Zählerschlüssel.
+```bash
+python -c "import secrets,base64; print(base64.b64encode(secrets.token_bytes(32)).decode())"
+```
+
+Die Namen in `secrets.yaml` müssen exakt mit den `!secret`-Verweisen der YAML übereinstimmen. Insbesondere heißen sie **`bkw_encryption` und `bkw_auth`**.
 
 ---
 
-# 10. GPK60 und GPK61
+# 10. BKW-Schlüssel: GPK60 und GPK61
 
-## GPK60
-
-Der GPK60 ist bei verschlüsselter Übertragung der Entschlüsselungsschlüssel. Er besteht normalerweise aus **32 Hex-Zeichen = 16 Byte**.
-
-Beispiel für das Format:
-
-```text
-00112233445566778899AABBCCDDEEFF
-```
-
-Nicht dieses Beispiel übernehmen, sondern den echten Schlüssel deines Zählers verwenden.
-
-## GPK61 optional
-
-Die Konfiguration verwendet standardmäßig nur GPK60.
-
-Falls du GPK61 ausdrücklich für die Authentifizierung nutzen möchtest, suche in `gplugk-bkw.yaml`:
+In der **aktuellen** `gplugk-bkw.yaml` sind beide Schlüssel so eingebunden:
 
 ```yaml
-# auth_key: !secret bkw_gpk61
+dlms_meter:
+  id: bkw_meter
+  uart_id: meter_uart
+  receive_timeout: 3000ms
+  decryption_key: !secret bkw_encryption  # GPK60
+  auth_key: !secret bkw_auth              # GPK61
+  skip_crc: false
 ```
 
-und ändere es zu:
+| Schlüssel in `secrets.yaml` | Verwendung | Format |
+| --- | --- | --- |
+| `bkw_encryption` | BKW GPK60: Entschlüsselung der DLMS-Nachrichten | 32 Hex-Zeichen / 16 Byte |
+| `bkw_auth` | BKW GPK61: Authentifizierung | 32 Hex-Zeichen / 16 Byte |
 
-```yaml
-auth_key: !secret bkw_gpk61
-```
+Die Schlüssel sind **keine** ESPHome-API- oder OTA-Schlüssel. Sie müssen zu deinem Smart Meter und der Freischaltung durch den Netzbetreiber passen.
 
-Danach zusätzlich in `secrets.yaml`:
+Wenn dein Zähler *keinen* Authentifizierungsschlüssel benötigt und dir keiner zugeteilt wurde, kannst du in der **YAML** die gesamte Zeile `auth_key: !secret bkw_auth` entfernen. Dann ist auch der Eintrag `bkw_auth` in deiner `secrets.yaml` nicht mehr nötig. **Keinen erfundenen GPK61 einsetzen**, um den fehlenden Wert zu kaschieren. Bei unklarer Schlüsselverwendung beim Netzbetreiber nachfragen.
 
-```yaml
-bkw_gpk61: "FFEEDDCCBBAA99887766554433221100"
-```
+Beachte: Das Beispiel-Secret enthält absichtlich nur Hex-Platzhalter, mit denen sich kein echter Zähler entschlüsseln lässt.
 
 ---
 
@@ -391,12 +392,14 @@ Dadurch werden diese Werte sinnvoll berechnet:
 
 1. YAML in ESPHome öffnen.
 2. **Install** wählen.
-3. Für die erste Installation USB verwenden.
-4. Nach erfolgreicher Erstinstallation können weitere Updates per OTA erfolgen.
+3. Für die erste Installation **USB** verwenden (Flashen ersetzt die Original-Firmware).
+4. Nach erfolgreicher Erstinstallation können weitere Updates per **verschlüsseltem nativen ESPHome-OTA** erfolgen. Die bereits installierte Firmware muss dafür den Modus unterstützen; bei älteren ESPHome-Firmwares ist ein Migrationsschritt oder USB-Flash nötig.
+5. Vor dem Flashen mit `esphome config gplugk-bkw.yaml` die Konfiguration auf der eingesetzten ESPHome-Version prüfen.
 
 ## ESPHome CLI
 
 ```bash
+esphome config gplugk-bkw.yaml
 esphome run gplugk-bkw.yaml
 ```
 
@@ -428,7 +431,7 @@ gplugk-bkw Setup
 http://192.168.4.1/
 ```
 
-7. WLAN-Zugangsdaten eintragen.
+7. Im Captive Portal bei Bedarf neue WLAN-Zugangsdaten eintragen. Sie werden im Gerät gespeichert und ändern **nicht automatisch die lokale `secrets.yaml`** auf deinem Rechner bzw. im ESPHome-Add-on. Bei der nächsten Firmwareänderung die Zugangsdaten dort ebenfalls nachführen.
 
 ---
 
@@ -445,7 +448,7 @@ Falls nicht:
 3. **Integration hinzufügen**
 4. **ESPHome**
 5. IP-Adresse oder Hostname des gPlugK eingeben
-6. falls verlangt den API-Key aus `secrets.yaml` verwenden
+6. falls verlangt den **Base64-kodierten** API-Schlüssel `api_key` aus `secrets.yaml` eingeben (nicht den GPK60/GPK61). Bei einer schon eingerichteten Installation den bestehenden API-Key beibehalten, sonst verliert Home Assistant die Verbindung.
 
 ---
 
@@ -554,7 +557,7 @@ Im RAM des ESP32 werden zusätzlich geführt:
 - Letztes Empfangsintervall
 - Abdeckung 15-Minuten-Mittel
 
-Das 15-Minuten-Mittel ist **zeitgewichtet**. Die reale Zeit zwischen zwei Telegrammen wird berücksichtigt.
+Das 15-Minuten-Mittel ist ein **gleitendes, zeitgewichtetes** Mittel aus den Empfangsintervallen. Der Wert wird erst ausgegeben, wenn das Fenster die **vollen 900 Sekunden** abdeckt; vorher ist er `unbekannt`. Bei einer größeren Empfangslücke (mindestens 35 Sekunden) wird das Fenster zurückgesetzt. Das Fenster ist **nicht** an Viertelstunden auf der Uhr ausgerichtet und deshalb **nicht automatisch identisch mit dem offiziellen 15-Minuten-Abrechnungswert** des Netzbetreibers.
 
 Nach einem Neustart beginnen Laufzeit- und Peakwerte wieder von vorne. Das verhindert unnötige Schreibzugriffe auf den Flash.
 
@@ -609,7 +612,7 @@ Grobe RSSI-Orientierung:
 
 Die `Chiptemperatur` ist die interne Temperatur des ESP32-C3 und **keine Raumtemperatur**.
 
-Die CPU läuft nicht dauerhaft mit 160 MHz: Durch das aktivierte ESP-IDF-DFS kann sie in Leerlaufphasen bis auf 40 MHz heruntertakten und bei Last automatisch wieder höher takten. Das geschieht transparent; DLMS, API und Weboberfläche müssen dafür nicht abgeschaltet werden.
+Die CPU läuft **mit maximal 80 MHz**, nicht mit 160 MHz. Mit dem aktivierten ESP-IDF-DFS kann sie bei passenden Laufzeitbedingungen auf 40 MHz heruntertakten. Der UART wird mit `clock_source: XTAL` betrieben, damit die Baudrate unabhängig von dynamischem APB-Takt stabil bleibt.
 
 ## Zählerdiagnose
 
@@ -651,6 +654,8 @@ web_username: "admin"
 web_password: "MeinWebPasswort"
 ```
 
+Die Weboberfläche verwendet **HTTP Digest** als Anmeldung, nicht HTTPS. Die Anmeldung schützt den Zugriff, **verschlüsselt aber die Messdaten und Firmware-Dateien beim HTTP-Transfer nicht**. Der Webserver sollte deshalb nur in einem vertrauenswürdigen lokalen Netz erreichbar sein, nie direkt aus dem Internet.
+
 Die Entitäten werden in Gruppen sortiert:
 
 - Netzanschluss
@@ -664,7 +669,7 @@ Die Entitäten werden in Gruppen sortiert:
 
 # 23. Typische Fehler
 
-## RGB-LED bleibt nach dem Start blau
+## RGB-LED blinkt nach dem Start blau
 
 Das bedeutet in dieser Konfiguration:
 
@@ -676,9 +681,10 @@ Prüfen:
 
 1. sitzt der gPlugK korrekt im HAN-Schacht?
 2. ist die Kundenschnittstelle vom Netzbetreiber aktiviert?
-3. ist der GPK60 korrekt?
-4. erscheinen im ESPHome-Log DLMS-Daten?
-5. wird `Alter der Zählerdaten` aktualisiert?
+3. sind `bkw_encryption` (GPK60) und ggf. `bkw_auth` (GPK61) richtig und im passenden Format?
+4. erscheinen im ESPHome-Log DLMS-Daten oder CRC-/Entschlüsselungsfehler?
+5. wird `Empfangene Datensätze seit Neustart` hochgezählt und `Alter der Zählerdaten` aktualisiert?
+6. bleibt der Zähler mit **USB-C als Testversorgung** stabil? Wenn ja, das reale Leistungsbudget am HAN-Anschluss prüfen.
 
 ## RGB-LED blinkt rot
 
@@ -704,8 +710,10 @@ Dann funktioniert der grundsätzliche Datenempfang wahrscheinlich bereits. Prüf
 
 Prüfe:
 
-- Letzter Neustartgrund
-- Versorgung über HAN bzw. testweise USB-C
+- `Letzter Neustartgrund` (Brownout, Watchdog usw.)
+- Versorgung über HAN bzw. **testweise USB-C**
+- WLAN-RSSI, Wiederholungen und AP-Erreichbarkeit, insbesondere bei schwachem Empfang im Zählerschrank
+- `power_save_mode: LIGHT` statt aggressiverem `HIGH` beibehalten; einen höheren CPU-Takt oder weitere Hintergrundfunktionen nur testweise verwenden
 
 ## Gerät startet nach gleichzeitigem Drücken von AP und Reset nicht normal
 
@@ -726,12 +734,12 @@ Folgende Werte niemals veröffentlichen:
 
 - WLAN-Passwort
 - `fallback_password`
-- GPK60
-- GPK61
+- GPK60 (`bkw_encryption`)
+- GPK61 (`bkw_auth`)
 - ESPHome API-Key
 - Passwort der Weboberfläche
 
-Genau deshalb liegt nur `secrets.example.yaml` im Repository.
+Genau deshalb liegt nur `secrets.example.yaml` im Repository. 
 
 ---
 
@@ -760,10 +768,11 @@ und in `secrets.yaml`:
 wifi_ssid: "MeinWLAN"
 wifi_password: "MeinWLANPasswort"
 fallback_password: "MeinSetupPasswort"
-api_key: "MEIN_API_KEY"
+api_key: "<EIGENER_32_BYTE_BASE64_API_SCHLUESSEL>"
 web_username: "admin"
 web_password: "MeinWebPasswort"
-bkw_gpk60: "MEIN_32_STELLIGER_HEX_SCHLUESSEL"
+bkw_encryption: "00112233445566778899AABBCCDDEEFF"  # eigenes GPK60 einsetzen
+bkw_auth: "FFEEDDCCBBAA99887766554433221100"        # eigenes GPK61 einsetzen
 ```
 
-Danach kompilieren, per USB installieren und die Startsequenz der RGB-LED beobachten.
+Die beiden Hex-Zeichenketten im letzten Beispiel sind **nur Formatbeispiele** und müssen durch die echten BKW-Schlüssel ersetzt werden. Auch den API-Key musst du erst generieren. Danach die Konfiguration prüfen, per USB installieren und die Startsequenz der RGB-LED beobachten.

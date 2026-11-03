@@ -28,7 +28,7 @@ substitutions:
 esphome:
   name: ${device_name}
   friendly_name: ${friendly_name}
-  min_version: 2026.8.2
+  min_version: 2026.9.0
   comment: BKW Kamstrup OMNIPOWER KS2 via native ESPHome DLMS
   on_boot:
     - priority: -100
@@ -58,12 +58,12 @@ esp32:
       CONFIG_PM_DFS_INIT_AUTO: y
 
 logger:
-  level: INFO
+  level: WARN
   baud_rate: 0
 
 # Liefert zusätzliche Systemdiagnosewerte wie Laufzeit und Reset-Grund.
 debug:
-  update_interval: 60s
+  update_interval: 90s
 
 wifi:
   id: gplugk_wifi
@@ -97,7 +97,6 @@ api:
 ota:
   - platform: esphome
     encryption:
-  - platform: web_server
 
 web_server:
   port: 80
