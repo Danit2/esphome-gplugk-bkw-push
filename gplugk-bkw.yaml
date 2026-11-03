@@ -45,9 +45,11 @@ esp32:
   # ESP32-C3 darf bis 160 MHz laufen. Mit DFS taktet ESP-IDF im Leerlauf
   # automatisch bis auf die 40-MHz-XTAL-Frequenz herunter. So bleibt für
   # DLMS/API kurzzeitig volle Leistung verfuegbar, ohne dauerhaft 160 MHz zu nutzen.
-  cpu_frequency: 160MHz
+  cpu_frequency: 80MHz
   framework:
     type: esp-idf
+    advanced: 
+      flash_chip: generic
     sdkconfig_options:
       # Espressif-Empfehlung für WiFi-Geräte: Min Modem-sleep + DFS.
       # Auto-Light-Sleep wird absichtlich NICHT aktiviert, damit der asynchrone
@@ -59,7 +61,7 @@ logger:
   level: INFO
   baud_rate: 0
 
-# Liefert zusätzliche Systemdiagnosewerte wie freien Heap und Reset-Grund.
+# Liefert zusätzliche Systemdiagnosewerte wie Laufzeit und Reset-Grund.
 debug:
   update_interval: 60s
 
@@ -67,7 +69,7 @@ wifi:
   id: gplugk_wifi
   ssid: !secret wifi_ssid
   password: !secret wifi_password
-  power_save_mode: light
+  power_save_mode: LIGHT
   # Stationäres Gerät: keine periodischen Roaming-Scans. Das spart WLAN-
   # Aktivitaet und vermeidet unnötige Lastspitzen im knappen Leistungsbudget.
   post_connect_roaming: false
@@ -135,16 +137,15 @@ uart:
   parity: NONE
   stop_bits: 1
   rx_buffer_size: 4096
+  clock_source: XTAL
 
 # ESPHome-eigene DLMS-Unterstuetzung.
 dlms_meter:
   id: bkw_meter
   uart_id: meter_uart
-  receive_timeout: 1500ms
-  decryption_key: !secret bkw_gpk60
-  # Falls BKW zusaetzlich einen GPK61/Auth-Key bereitstellt, die folgende
-  # Zeile aktivieren und bkw_gpk61 in secrets.yaml eintragen:
-  # auth_key: !secret bkw_gpk61
+  receive_timeout: 3000ms
+  decryption_key: !secret bkw_encryption
+  auth_key: !secret bkw_auth
   skip_crc: false
   custom_patterns:
     # Die Listenkennung steht beim BKW/Kamstrup-Telegramm am Anfang ohne
