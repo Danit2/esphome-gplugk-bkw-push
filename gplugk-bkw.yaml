@@ -142,7 +142,7 @@ uart:
 dlms_meter:
   id: bkw_meter
   uart_id: meter_uart
-  receive_timeout: 3000ms
+  receive_timeout: 100ms
   decryption_key: !secret bkw_encryption
   auth_key: !secret bkw_auth
   skip_crc: false
@@ -157,6 +157,24 @@ dlms_meter:
 # Laufzeitstatus für Diagnosewerte. Keine Flash-Schreibvorgaenge.
 globals:
   - id: last_data_ms
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+
+  # Pro Telegramm: 14 Messwerte und ein Abschluss-OBIS-Feld.
+  # Die Listenkennung startet; alle 14 Werte plus Abschlussfeld loesen aus.
+  # Kein Flash: nur RAM, beim Neustart automatisch zurückgesetzt.
+  - id: meter_frame_active
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+
+  - id: meter_seen_mask
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+
+  - id: meter_frame_started_ms
     type: uint32_t
     restore_value: no
     initial_value: '0'
@@ -264,9 +282,9 @@ script:
                 format: "AP-Taster: Setup-Access-Point wird aktiviert."
             - lambda: id(gplugk_wifi).set_ap_timeout(1);
 
-  # Wird einmal pro vollstaendig bis zum letzten numerischen OBIS-Wert
-  # gelaufenem Telegramm aufgerufen. Hier entstehen die Laufzeitstatistiken
-  # und das zeitgewichtete 15-Minuten-Fenster - komplett in YAML/Lambdas.
+  # Nur bei 14/14 Messwerten plus Abschlussfeld EINES Telegramms.
+  # Hier entstehen die 15 Berechnungen, zugehörige Textstatus und die
+  # zeitgewichteten 15-Minuten-Statistiken in EINEM Schnappschuss.
   - id: process_meter_update
     mode: queued
     max_runs: 2
@@ -275,6 +293,47 @@ script:
           const uint32_t now = millis();
           constexpr uint32_t PERIOD_MS = 900000;
           constexpr size_t WINDOW_SIZE = 192;
+
+          // Diese Werte sind bereits durch die Bitmaske als neu empfangen
+          // bestaetigt. Einmalig kopieren, danach nur mit diesem Schnappschuss
+          // rechnen (keine Template-Zwischenwerte, keine 10-s-Timer).
+          const float p_in = id(power_import_total).state;
+          const float p_out = id(power_export_total).state;
+          const float p_in1 = id(power_import_l1).state;
+          const float p_out1 = id(power_export_l1).state;
+          const float p_in2 = id(power_import_l2).state;
+          const float p_out2 = id(power_export_l2).state;
+          const float p_in3 = id(power_import_l3).state;
+          const float p_out3 = id(power_export_l3).state;
+          const float i1 = id(current_l1).state;
+          const float i2 = id(current_l2).state;
+          const float i3 = id(current_l3).state;
+          const float u1 = id(voltage_l1).state;
+          const float u2 = id(voltage_l2).state;
+          const float u3 = id(voltage_l3).state;
+          const float fuse = ${main_fuse_a};
+
+          // Zusaetzliche Absicherung, falls ein Sensor unmittelbar nach dem
+          // Trigger ungueltig geworden sein sollte (z. B. Timeout-Filter).
+          const float values[] = {
+            p_in, p_out, p_in1, p_out1, p_in2, p_out2,
+            p_in3, p_out3, i1, i2, i3, u1, u2, u3
+          };
+          for (float v : values) {
+            if (!std::isfinite(v)) {
+              ESP_LOGW("bkw_calc", "Telegramm unvollstaendig: Sensorstatus ungueltig");
+              return;
+            }
+          }
+
+          const float p_net = p_in - p_out;
+          const float p1 = p_in1 - p_out1;
+          const float p2 = p_in2 - p_out2;
+          const float p3 = p_in3 - p_out3;
+          const float p_phases = p1 + p2 + p3;
+          const float max_i = std::max(i1, std::max(i2, i3));
+          const float min_i = std::min(i1, std::min(i2, i3));
+          const bool fuse_ok = std::isfinite(fuse) && fuse > 0.0f;
 
           static bool have_previous = false;
           static uint32_t previous_ms = 0;
@@ -303,13 +362,8 @@ script:
             return std::min(duration_ms[idx], PERIOD_MS - age);
           };
 
-          float import_now = NAN;
-          float export_now = NAN;
-          if (!isnan(id(power_import_total).state) && !isnan(id(power_export_total).state)) {
-            const float net = id(power_import_total).state - id(power_export_total).state;
-            import_now = std::max(net, 0.0f);
-            export_now = std::max(-net, 0.0f);
-          }
+          const float import_now = std::max(p_net, 0.0f);
+          const float export_now = std::max(-p_net, 0.0f);
 
           if (have_previous) {
             const uint32_t elapsed = now - previous_ms;
@@ -376,10 +430,38 @@ script:
           id(mean_export_15min).publish_state(mean_export);
           id(window_coverage_sensor).publish_state(id(window_coverage_s_value));
 
-          have_previous = !isnan(import_now);
+          have_previous = true;
           previous_ms = now;
-          previous_import = isnan(import_now) ? 0.0f : import_now;
-          previous_export = isnan(export_now) ? 0.0f : export_now;
+          previous_import = import_now;
+          previous_export = export_now;
+
+          // Alle 15 berechneten Sensoren: derselbe gültige Datensatz.
+          id(net_power).publish_state(p_net);
+          id(net_import_power).publish_state(import_now);
+          id(net_export_power).publish_state(export_now);
+          id(net_power_l1).publish_state(p1);
+          id(net_power_l2).publish_state(p2);
+          id(net_power_l3).publish_state(p3);
+          id(net_power_from_phases).publish_state(p_phases);
+          id(balancing_difference).publish_state(p_net - p_phases);
+          id(simultaneous_import_export).publish_state(std::min(p_in, p_out));
+          id(current_max).publish_state(max_i);
+          id(fuse_utilization).publish_state(fuse_ok ? 100.0f * max_i / fuse : NAN);
+          id(current_headroom).publish_state(fuse_ok ? fuse - max_i : NAN);
+          id(current_sum).publish_state(i1 + i2 + i3);
+          id(current_spread).publish_state(max_i - min_i);
+          id(apparent_power_sum).publish_state(u1 * i1 + u2 * i2 + u3 * i3);
+
+          // Auch die vom Zähler abhängigen Textstatus direkt aus dem
+          // Schnappschuss ableiten; nicht 10 Sekunden später aus anderen
+          // berechneten Sensordaten auslesen.
+          id(busiest_phase).publish_state(
+              i1 >= i2 && i1 >= i3 ? "L1" : (i2 >= i3 ? "L2" : "L3"));
+          id(fuse_threshold_status).publish_state(
+              !fuse_ok ? "Nicht konfiguriert" :
+              (max_i > fuse ? "Überschritten" : "Innerhalb Grenzwert"));
+          id(simultaneous_directions_status).publish_state(
+              std::min(p_in, p_out) > 0.0f ? "Erkannt" : "Nicht erkannt");
 
 # RGB-Statuslogik. Prioritaet: Startsequenz > WLAN-Fehler > keine Daten > Datenimpuls.
 # Rot blinkt ca. alle 9 s ohne WLAN, Blau ca. alle 15 s ohne Zählerdaten,
@@ -488,6 +570,20 @@ sensor:
     filters:
       - multiply: ${ct_factor}
       - timeout: ${stale_after}
+    # Bit 0: neuer, bereits skalierter Wert dieses Telegramms.
+    on_value:
+      then:
+        - lambda: |-
+            if (id(meter_frame_active) &&
+                uint32_t(millis() - id(meter_frame_started_ms)) < 3000UL &&
+                std::isfinite(x)) {
+              id(meter_seen_mask) |= (1UL << 0);
+              // 14 Messwerte + Abschlussfeld, nur einmal je Telegramm.
+              if (id(meter_seen_mask) == 0x7FFFUL) {
+                id(meter_frame_active) = false;
+                id(process_meter_update).execute();
+              }
+            }
     web_server:
       sorting_group_id: group_grid
 
@@ -503,6 +599,20 @@ sensor:
     filters:
       - multiply: ${ct_factor}
       - timeout: ${stale_after}
+    # Bit 1: neuer, bereits skalierter Wert dieses Telegramms.
+    on_value:
+      then:
+        - lambda: |-
+            if (id(meter_frame_active) &&
+                uint32_t(millis() - id(meter_frame_started_ms)) < 3000UL &&
+                std::isfinite(x)) {
+              id(meter_seen_mask) |= (1UL << 1);
+              // 14 Messwerte + Abschlussfeld, nur einmal je Telegramm.
+              if (id(meter_seen_mask) == 0x7FFFUL) {
+                id(meter_frame_active) = false;
+                id(process_meter_update).execute();
+              }
+            }
     web_server:
       sorting_group_id: group_grid
 
@@ -558,6 +668,20 @@ sensor:
     accuracy_decimals: 1
     filters:
       - timeout: ${stale_after}
+    # Bit 11: neuer, bereits skalierter Wert dieses Telegramms.
+    on_value:
+      then:
+        - lambda: |-
+            if (id(meter_frame_active) &&
+                uint32_t(millis() - id(meter_frame_started_ms)) < 3000UL &&
+                std::isfinite(x)) {
+              id(meter_seen_mask) |= (1UL << 11);
+              // 14 Messwerte + Abschlussfeld, nur einmal je Telegramm.
+              if (id(meter_seen_mask) == 0x7FFFUL) {
+                id(meter_frame_active) = false;
+                id(process_meter_update).execute();
+              }
+            }
     web_server:
       sorting_group_id: group_phase
 
@@ -572,6 +696,20 @@ sensor:
     accuracy_decimals: 1
     filters:
       - timeout: ${stale_after}
+    # Bit 12: neuer, bereits skalierter Wert dieses Telegramms.
+    on_value:
+      then:
+        - lambda: |-
+            if (id(meter_frame_active) &&
+                uint32_t(millis() - id(meter_frame_started_ms)) < 3000UL &&
+                std::isfinite(x)) {
+              id(meter_seen_mask) |= (1UL << 12);
+              // 14 Messwerte + Abschlussfeld, nur einmal je Telegramm.
+              if (id(meter_seen_mask) == 0x7FFFUL) {
+                id(meter_frame_active) = false;
+                id(process_meter_update).execute();
+              }
+            }
     web_server:
       sorting_group_id: group_phase
 
@@ -586,6 +724,20 @@ sensor:
     accuracy_decimals: 1
     filters:
       - timeout: ${stale_after}
+    # Bit 13: neuer, bereits skalierter Wert dieses Telegramms.
+    on_value:
+      then:
+        - lambda: |-
+            if (id(meter_frame_active) &&
+                uint32_t(millis() - id(meter_frame_started_ms)) < 3000UL &&
+                std::isfinite(x)) {
+              id(meter_seen_mask) |= (1UL << 13);
+              // 14 Messwerte + Abschlussfeld, nur einmal je Telegramm.
+              if (id(meter_seen_mask) == 0x7FFFUL) {
+                id(meter_frame_active) = false;
+                id(process_meter_update).execute();
+              }
+            }
     web_server:
       sorting_group_id: group_phase
 
@@ -602,6 +754,20 @@ sensor:
       - multiply: 0.01
       - multiply: ${ct_factor}
       - timeout: ${stale_after}
+    # Bit 8: neuer, bereits skalierter Wert dieses Telegramms.
+    on_value:
+      then:
+        - lambda: |-
+            if (id(meter_frame_active) &&
+                uint32_t(millis() - id(meter_frame_started_ms)) < 3000UL &&
+                std::isfinite(x)) {
+              id(meter_seen_mask) |= (1UL << 8);
+              // 14 Messwerte + Abschlussfeld, nur einmal je Telegramm.
+              if (id(meter_seen_mask) == 0x7FFFUL) {
+                id(meter_frame_active) = false;
+                id(process_meter_update).execute();
+              }
+            }
     web_server:
       sorting_group_id: group_phase
 
@@ -618,6 +784,20 @@ sensor:
       - multiply: 0.01
       - multiply: ${ct_factor}
       - timeout: ${stale_after}
+    # Bit 9: neuer, bereits skalierter Wert dieses Telegramms.
+    on_value:
+      then:
+        - lambda: |-
+            if (id(meter_frame_active) &&
+                uint32_t(millis() - id(meter_frame_started_ms)) < 3000UL &&
+                std::isfinite(x)) {
+              id(meter_seen_mask) |= (1UL << 9);
+              // 14 Messwerte + Abschlussfeld, nur einmal je Telegramm.
+              if (id(meter_seen_mask) == 0x7FFFUL) {
+                id(meter_frame_active) = false;
+                id(process_meter_update).execute();
+              }
+            }
     web_server:
       sorting_group_id: group_phase
 
@@ -634,6 +814,20 @@ sensor:
       - multiply: 0.01
       - multiply: ${ct_factor}
       - timeout: ${stale_after}
+    # Bit 10: neuer, bereits skalierter Wert dieses Telegramms.
+    on_value:
+      then:
+        - lambda: |-
+            if (id(meter_frame_active) &&
+                uint32_t(millis() - id(meter_frame_started_ms)) < 3000UL &&
+                std::isfinite(x)) {
+              id(meter_seen_mask) |= (1UL << 10);
+              // 14 Messwerte + Abschlussfeld, nur einmal je Telegramm.
+              if (id(meter_seen_mask) == 0x7FFFUL) {
+                id(meter_frame_active) = false;
+                id(process_meter_update).execute();
+              }
+            }
     web_server:
       sorting_group_id: group_phase
 
@@ -650,6 +844,20 @@ sensor:
     filters:
       - multiply: ${ct_factor}
       - timeout: ${stale_after}
+    # Bit 2: neuer, bereits skalierter Wert dieses Telegramms.
+    on_value:
+      then:
+        - lambda: |-
+            if (id(meter_frame_active) &&
+                uint32_t(millis() - id(meter_frame_started_ms)) < 3000UL &&
+                std::isfinite(x)) {
+              id(meter_seen_mask) |= (1UL << 2);
+              // 14 Messwerte + Abschlussfeld, nur einmal je Telegramm.
+              if (id(meter_seen_mask) == 0x7FFFUL) {
+                id(meter_frame_active) = false;
+                id(process_meter_update).execute();
+              }
+            }
     web_server:
       sorting_group_id: group_phase
 
@@ -665,6 +873,20 @@ sensor:
     filters:
       - multiply: ${ct_factor}
       - timeout: ${stale_after}
+    # Bit 4: neuer, bereits skalierter Wert dieses Telegramms.
+    on_value:
+      then:
+        - lambda: |-
+            if (id(meter_frame_active) &&
+                uint32_t(millis() - id(meter_frame_started_ms)) < 3000UL &&
+                std::isfinite(x)) {
+              id(meter_seen_mask) |= (1UL << 4);
+              // 14 Messwerte + Abschlussfeld, nur einmal je Telegramm.
+              if (id(meter_seen_mask) == 0x7FFFUL) {
+                id(meter_frame_active) = false;
+                id(process_meter_update).execute();
+              }
+            }
     web_server:
       sorting_group_id: group_phase
 
@@ -680,6 +902,20 @@ sensor:
     filters:
       - multiply: ${ct_factor}
       - timeout: ${stale_after}
+    # Bit 6: neuer, bereits skalierter Wert dieses Telegramms.
+    on_value:
+      then:
+        - lambda: |-
+            if (id(meter_frame_active) &&
+                uint32_t(millis() - id(meter_frame_started_ms)) < 3000UL &&
+                std::isfinite(x)) {
+              id(meter_seen_mask) |= (1UL << 6);
+              // 14 Messwerte + Abschlussfeld, nur einmal je Telegramm.
+              if (id(meter_seen_mask) == 0x7FFFUL) {
+                id(meter_frame_active) = false;
+                id(process_meter_update).execute();
+              }
+            }
     web_server:
       sorting_group_id: group_phase
 
@@ -695,6 +931,20 @@ sensor:
     filters:
       - multiply: ${ct_factor}
       - timeout: ${stale_after}
+    # Bit 3: neuer, bereits skalierter Wert dieses Telegramms.
+    on_value:
+      then:
+        - lambda: |-
+            if (id(meter_frame_active) &&
+                uint32_t(millis() - id(meter_frame_started_ms)) < 3000UL &&
+                std::isfinite(x)) {
+              id(meter_seen_mask) |= (1UL << 3);
+              // 14 Messwerte + Abschlussfeld, nur einmal je Telegramm.
+              if (id(meter_seen_mask) == 0x7FFFUL) {
+                id(meter_frame_active) = false;
+                id(process_meter_update).execute();
+              }
+            }
     web_server:
       sorting_group_id: group_phase
 
@@ -710,6 +960,20 @@ sensor:
     filters:
       - multiply: ${ct_factor}
       - timeout: ${stale_after}
+    # Bit 5: neuer, bereits skalierter Wert dieses Telegramms.
+    on_value:
+      then:
+        - lambda: |-
+            if (id(meter_frame_active) &&
+                uint32_t(millis() - id(meter_frame_started_ms)) < 3000UL &&
+                std::isfinite(x)) {
+              id(meter_seen_mask) |= (1UL << 5);
+              // 14 Messwerte + Abschlussfeld, nur einmal je Telegramm.
+              if (id(meter_seen_mask) == 0x7FFFUL) {
+                id(meter_frame_active) = false;
+                id(process_meter_update).execute();
+              }
+            }
     web_server:
       sorting_group_id: group_phase
 
@@ -725,6 +989,20 @@ sensor:
     filters:
       - multiply: ${ct_factor}
       - timeout: ${stale_after}
+    # Bit 7: neuer, bereits skalierter Wert dieses Telegramms.
+    on_value:
+      then:
+        - lambda: |-
+            if (id(meter_frame_active) &&
+                uint32_t(millis() - id(meter_frame_started_ms)) < 3000UL &&
+                std::isfinite(x)) {
+              id(meter_seen_mask) |= (1UL << 7);
+              // 14 Messwerte + Abschlussfeld, nur einmal je Telegramm.
+              if (id(meter_seen_mask) == 0x7FFFUL) {
+                id(meter_frame_active) = false;
+                id(process_meter_update).execute();
+              }
+            }
     web_server:
       sorting_group_id: group_phase
 
@@ -866,15 +1144,27 @@ sensor:
       - multiply: 0.001
       - multiply: ${ct_factor}
       - timeout: ${stale_after}
-    on_raw_value:
+    # Bit 14: neuer, bereits skalierter Wert dieses Telegramms.
+    on_value:
       then:
-        - script.execute: process_meter_update
+        - lambda: |-
+            if (id(meter_frame_active) &&
+                uint32_t(millis() - id(meter_frame_started_ms)) < 3000UL &&
+                std::isfinite(x)) {
+              id(meter_seen_mask) |= (1UL << 14);
+              // 14 Messwerte + Abschlussfeld, nur einmal je Telegramm.
+              if (id(meter_seen_mask) == 0x7FFFUL) {
+                id(meter_frame_active) = false;
+                id(process_meter_update).execute();
+              }
+            }
     web_server:
       sorting_group_id: group_energy
 
-  # --- Berechnete Werte -----------------------------------------------------
-  # Bezug ist positiv, Rücklieferung negativ. Die Berechnungen verwenden
-  # ausschliesslich die oben empfangenen und bereits skalierten Zählerwerte.
+  # --- Berechnete Werte ----------------------------------------------------
+  # Keine eigene 10-s-Abtastung. Alle Werte werden ausschliesslich vom
+  # process_meter_update-Skript nach einer vollstaendigen BKW-Nachricht gesetzt.
+  # Ohne neues Telegramm gibt es keine neue Berechnung.
   - platform: template
     id: net_power
     name: "Netzleistung saldiert"
@@ -882,11 +1172,7 @@ sensor:
     device_class: power
     state_class: measurement
     accuracy_decimals: 0
-    update_interval: 10s
-    lambda: |-
-      if (id(last_data_ms) == 0 || uint32_t(millis() - id(last_data_ms)) >= ${stale_after_ms}) return NAN;
-      if (isnan(id(power_import_total).state) || isnan(id(power_export_total).state)) return NAN;
-      return id(power_import_total).state - id(power_export_total).state;
+    update_interval: never
     web_server:
       sorting_group_id: group_calculated
 
@@ -897,12 +1183,7 @@ sensor:
     device_class: power
     state_class: measurement
     accuracy_decimals: 0
-    update_interval: 10s
-    lambda: |-
-      if (id(last_data_ms) == 0 || uint32_t(millis() - id(last_data_ms)) >= ${stale_after_ms}) return NAN;
-      if (isnan(id(power_import_total).state) || isnan(id(power_export_total).state)) return NAN;
-      const float net = id(power_import_total).state - id(power_export_total).state;
-      return std::max(net, 0.0f);
+    update_interval: never
     web_server:
       sorting_group_id: group_calculated
 
@@ -913,12 +1194,7 @@ sensor:
     device_class: power
     state_class: measurement
     accuracy_decimals: 0
-    update_interval: 10s
-    lambda: |-
-      if (id(last_data_ms) == 0 || uint32_t(millis() - id(last_data_ms)) >= ${stale_after_ms}) return NAN;
-      if (isnan(id(power_import_total).state) || isnan(id(power_export_total).state)) return NAN;
-      const float net = id(power_import_total).state - id(power_export_total).state;
-      return std::max(-net, 0.0f);
+    update_interval: never
     web_server:
       sorting_group_id: group_calculated
 
@@ -929,11 +1205,7 @@ sensor:
     device_class: power
     state_class: measurement
     accuracy_decimals: 0
-    update_interval: 10s
-    lambda: |-
-      if (id(last_data_ms) == 0 || uint32_t(millis() - id(last_data_ms)) >= ${stale_after_ms}) return NAN;
-      if (isnan(id(power_import_l1).state) || isnan(id(power_export_l1).state)) return NAN;
-      return id(power_import_l1).state - id(power_export_l1).state;
+    update_interval: never
     web_server:
       sorting_group_id: group_calculated
 
@@ -944,11 +1216,7 @@ sensor:
     device_class: power
     state_class: measurement
     accuracy_decimals: 0
-    update_interval: 10s
-    lambda: |-
-      if (id(last_data_ms) == 0 || uint32_t(millis() - id(last_data_ms)) >= ${stale_after_ms}) return NAN;
-      if (isnan(id(power_import_l2).state) || isnan(id(power_export_l2).state)) return NAN;
-      return id(power_import_l2).state - id(power_export_l2).state;
+    update_interval: never
     web_server:
       sorting_group_id: group_calculated
 
@@ -959,11 +1227,7 @@ sensor:
     device_class: power
     state_class: measurement
     accuracy_decimals: 0
-    update_interval: 10s
-    lambda: |-
-      if (id(last_data_ms) == 0 || uint32_t(millis() - id(last_data_ms)) >= ${stale_after_ms}) return NAN;
-      if (isnan(id(power_import_l3).state) || isnan(id(power_export_l3).state)) return NAN;
-      return id(power_import_l3).state - id(power_export_l3).state;
+    update_interval: never
     web_server:
       sorting_group_id: group_calculated
 
@@ -974,11 +1238,7 @@ sensor:
     device_class: current
     state_class: measurement
     accuracy_decimals: 2
-    update_interval: 10s
-    lambda: |-
-      if (id(last_data_ms) == 0 || uint32_t(millis() - id(last_data_ms)) >= ${stale_after_ms}) return NAN;
-      if (isnan(id(current_l1).state) || isnan(id(current_l2).state) || isnan(id(current_l3).state)) return NAN;
-      return std::max(id(current_l1).state, std::max(id(current_l2).state, id(current_l3).state));
+    update_interval: never
     web_server:
       sorting_group_id: group_calculated
 
@@ -988,12 +1248,7 @@ sensor:
     unit_of_measurement: "%"
     state_class: measurement
     accuracy_decimals: 1
-    update_interval: 10s
-    lambda: |-
-      if (id(last_data_ms) == 0 || uint32_t(millis() - id(last_data_ms)) >= ${stale_after_ms}) return NAN;
-      const float fuse = ${main_fuse_a};
-      if (fuse <= 0 || isnan(id(current_max).state)) return NAN;
-      return id(current_max).state / fuse * 100.0f;
+    update_interval: never
     web_server:
       sorting_group_id: group_calculated
 
@@ -1004,12 +1259,7 @@ sensor:
     device_class: current
     state_class: measurement
     accuracy_decimals: 2
-    update_interval: 10s
-    lambda: |-
-      if (id(last_data_ms) == 0 || uint32_t(millis() - id(last_data_ms)) >= ${stale_after_ms}) return NAN;
-      const float fuse = ${main_fuse_a};
-      if (fuse <= 0 || isnan(id(current_max).state)) return NAN;
-      return fuse - id(current_max).state;
+    update_interval: never
     web_server:
       sorting_group_id: group_calculated
 
@@ -1020,13 +1270,7 @@ sensor:
     device_class: power
     state_class: measurement
     accuracy_decimals: 0
-    update_interval: 10s
-    lambda: |-
-      if (id(last_data_ms) == 0 || uint32_t(millis() - id(last_data_ms)) >= ${stale_after_ms}) return NAN;
-      if (isnan(id(power_import_l1).state) || isnan(id(power_import_l2).state) || isnan(id(power_import_l3).state) ||
-          isnan(id(power_export_l1).state) || isnan(id(power_export_l2).state) || isnan(id(power_export_l3).state)) return NAN;
-      return id(power_import_l1).state + id(power_import_l2).state + id(power_import_l3).state
-           - id(power_export_l1).state - id(power_export_l2).state - id(power_export_l3).state;
+    update_interval: never
     web_server:
       sorting_group_id: group_calculated
 
@@ -1037,10 +1281,7 @@ sensor:
     device_class: power
     state_class: measurement
     accuracy_decimals: 0
-    update_interval: 10s
-    lambda: |-
-      if (isnan(id(net_power).state) || isnan(id(net_power_from_phases).state)) return NAN;
-      return id(net_power).state - id(net_power_from_phases).state;
+    update_interval: never
     web_server:
       sorting_group_id: group_calculated
 
@@ -1051,11 +1292,7 @@ sensor:
     device_class: power
     state_class: measurement
     accuracy_decimals: 0
-    update_interval: 10s
-    lambda: |-
-      if (id(last_data_ms) == 0 || uint32_t(millis() - id(last_data_ms)) >= ${stale_after_ms}) return NAN;
-      if (isnan(id(power_import_total).state) || isnan(id(power_export_total).state)) return NAN;
-      return std::min(id(power_import_total).state, id(power_export_total).state);
+    update_interval: never
     web_server:
       sorting_group_id: group_calculated
 
@@ -1066,11 +1303,7 @@ sensor:
     device_class: current
     state_class: measurement
     accuracy_decimals: 2
-    update_interval: 10s
-    lambda: |-
-      if (id(last_data_ms) == 0 || uint32_t(millis() - id(last_data_ms)) >= ${stale_after_ms}) return NAN;
-      if (isnan(id(current_l1).state) || isnan(id(current_l2).state) || isnan(id(current_l3).state)) return NAN;
-      return id(current_l1).state + id(current_l2).state + id(current_l3).state;
+    update_interval: never
     web_server:
       sorting_group_id: group_calculated
 
@@ -1081,13 +1314,7 @@ sensor:
     device_class: current
     state_class: measurement
     accuracy_decimals: 2
-    update_interval: 10s
-    lambda: |-
-      if (id(last_data_ms) == 0 || uint32_t(millis() - id(last_data_ms)) >= ${stale_after_ms}) return NAN;
-      if (isnan(id(current_l1).state) || isnan(id(current_l2).state) || isnan(id(current_l3).state)) return NAN;
-      const float maximum = std::max(id(current_l1).state, std::max(id(current_l2).state, id(current_l3).state));
-      const float minimum = std::min(id(current_l1).state, std::min(id(current_l2).state, id(current_l3).state));
-      return maximum - minimum;
+    update_interval: never
     web_server:
       sorting_group_id: group_calculated
 
@@ -1098,14 +1325,7 @@ sensor:
     device_class: apparent_power
     state_class: measurement
     accuracy_decimals: 0
-    update_interval: 10s
-    lambda: |-
-      if (id(last_data_ms) == 0 || uint32_t(millis() - id(last_data_ms)) >= ${stale_after_ms}) return NAN;
-      if (isnan(id(voltage_l1).state) || isnan(id(voltage_l2).state) || isnan(id(voltage_l3).state) ||
-          isnan(id(current_l1).state) || isnan(id(current_l2).state) || isnan(id(current_l3).state)) return NAN;
-      return id(voltage_l1).state * id(current_l1).state
-           + id(voltage_l2).state * id(current_l2).state
-           + id(voltage_l3).state * id(current_l3).state;
+    update_interval: never
     web_server:
       sorting_group_id: group_calculated
 
@@ -1183,7 +1403,7 @@ sensor:
     state_class: measurement
     accuracy_decimals: 0
     entity_category: diagnostic
-    update_interval: 10s
+    update_interval: 1s
     lambda: |-
       if (id(last_data_ms) == 0) return NAN;
       return uint32_t(millis() - id(last_data_ms)) / 1000.0f;
@@ -1283,6 +1503,19 @@ text_sensor:
     obis_code: "1.1.0.2.129.255"
     name: "OBIS Listenkennung"
     entity_category: diagnostic
+    # Dieses Feld steht am Anfang jedes BKW-PUSH-Telegramms.
+    # Es verhindert, dass Messwerte aus verschiedenen Telegrammen
+    # für eine Berechnung zusammengemischt werden.
+    on_value:
+      then:
+        - lambda: |-
+            if (id(meter_frame_active)) {
+              ESP_LOGW("bkw_calc", "Vorheriges Telegramm unvollstaendig: Maske 0x%04lX",
+                       (unsigned long) id(meter_seen_mask));
+            }
+            id(meter_seen_mask) = 0UL;
+            id(meter_frame_started_ms) = millis();
+            id(meter_frame_active) = true;
     web_server:
       sorting_group_id: group_info
 
@@ -1298,12 +1531,7 @@ text_sensor:
     name: "Höchstbelastete Phase"
     id: busiest_phase
     entity_category: diagnostic
-    update_interval: 10s
-    lambda: |-
-      if (isnan(id(current_l1).state) || isnan(id(current_l2).state) || isnan(id(current_l3).state)) return {"unbekannt"};
-      if (id(current_l1).state >= id(current_l2).state && id(current_l1).state >= id(current_l3).state) return {"L1"};
-      if (id(current_l2).state >= id(current_l3).state) return {"L2"};
-      return {"L3"};
+    update_interval: never
     web_server:
       sorting_group_id: group_calculated
 
@@ -1311,11 +1539,24 @@ text_sensor:
     name: "Datenstatus"
     id: data_status
     entity_category: diagnostic
-    update_interval: 5s
+    # Nur Zustandsaenderungen publizieren, nicht alle 5 Sekunden "OK".
+    # Ein 1-s-Check erkennt auch den Empfangsausfall zeitnah.
+    update_interval: 1s
     lambda: |-
-      if (id(last_data_ms) == 0) return {"Warte auf Zählerdaten"};
-      if (uint32_t(millis() - id(last_data_ms)) >= ${stale_after_ms}) return {"Daten veraltet"};
-      return {"OK"};
+      std::string next_status;
+      if (id(last_data_ms) == 0) {
+        next_status = "Warte auf Zählerdaten";
+      } else if (uint32_t(millis() - id(last_data_ms)) >= ${stale_after_ms}) {
+        next_status = "Daten veraltet";
+      } else {
+        next_status = "OK";
+      }
+      // ESPHome: return {} unterdrueckt die Veroeffentlichung.
+      // Bei HA-Neuverbindung liefert die API den zuletzt publizierten Zustand.
+      static std::string last_status;
+      if (next_status == last_status) return {};
+      last_status = next_status;
+      return {next_status};
     web_server:
       sorting_group_id: group_diagnostics
 
@@ -1323,13 +1564,7 @@ text_sensor:
     name: "Sicherungsgrenze Phasenstrom"
     id: fuse_threshold_status
     entity_category: diagnostic
-    update_interval: 10s
-    lambda: |-
-      const float fuse = ${main_fuse_a};
-      if (fuse <= 0.0f) return {"Nicht konfiguriert"};
-      if (id(last_data_ms) == 0 || uint32_t(millis() - id(last_data_ms)) >= ${stale_after_ms}) return {"Keine aktuellen Daten"};
-      if (isnan(id(current_max).state)) return {"Keine aktuellen Daten"};
-      return id(current_max).state > fuse ? std::string("Überschritten") : std::string("Innerhalb Grenzwert");
+    update_interval: never
     web_server:
       sorting_group_id: group_diagnostics
 
@@ -1337,11 +1572,7 @@ text_sensor:
     name: "Status gleichzeitiger Bezug und Rücklieferung"
     id: simultaneous_directions_status
     entity_category: diagnostic
-    update_interval: 10s
-    lambda: |-
-      if (id(last_data_ms) == 0 || uint32_t(millis() - id(last_data_ms)) >= ${stale_after_ms}) return {"Keine aktuellen Daten"};
-      if (isnan(id(simultaneous_import_export).state)) return {"Keine aktuellen Daten"};
-      return id(simultaneous_import_export).state > 0.0f ? std::string("Erkannt") : std::string("Nicht erkannt");
+    update_interval: never
     web_server:
       sorting_group_id: group_diagnostics
 
@@ -1383,9 +1614,31 @@ binary_sensor:
         # Beim Veralten einmal gezielt auf unbekannt/0 setzen, statt jede
         # Sekunde unveränderte Diagnosewerte über WLAN zu senden.
         - lambda: |-
+            id(meter_frame_active) = false;
+            id(meter_seen_mask) = 0UL;
             id(mean_import_15min).publish_state(NAN);
             id(mean_export_15min).publish_state(NAN);
             id(window_coverage_sensor).publish_state(0.0f);
+
+            // Keine alten, scheinbar aktuellen Ableitungen bei Datenausfall.
+            id(net_power).publish_state(NAN);
+            id(net_import_power).publish_state(NAN);
+            id(net_export_power).publish_state(NAN);
+            id(net_power_l1).publish_state(NAN);
+            id(net_power_l2).publish_state(NAN);
+            id(net_power_l3).publish_state(NAN);
+            id(current_max).publish_state(NAN);
+            id(fuse_utilization).publish_state(NAN);
+            id(current_headroom).publish_state(NAN);
+            id(net_power_from_phases).publish_state(NAN);
+            id(balancing_difference).publish_state(NAN);
+            id(simultaneous_import_export).publish_state(NAN);
+            id(current_sum).publish_state(NAN);
+            id(current_spread).publish_state(NAN);
+            id(apparent_power_sum).publish_state(NAN);
+            id(busiest_phase).publish_state("unbekannt");
+            id(fuse_threshold_status).publish_state("Keine aktuellen Daten");
+            id(simultaneous_directions_status).publish_state("Keine aktuellen Daten");
     web_server:
       sorting_group_id: group_diagnostics
 
